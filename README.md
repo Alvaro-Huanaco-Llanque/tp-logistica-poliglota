@@ -1,7 +1,12 @@
 # tp-logistica-poliglota
 
+en terminal ejecutar esto para el entorno virutal
 venv\Scripts\activate.bat
-python main.py
+
+
+HACER pip install -r requirements.txt
+
+para levantar terminal: python main.py
 
 CLIENTE
 cuit: 20123456789
