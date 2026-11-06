@@ -9,7 +9,8 @@ def input_seguro(mensaje):
         print("\n\n↩️ Operación cancelada por el usuario. Volviendo al menú...")
         raise KeyboardInterrupt
 
-# --- UTILIDADES DE FORMATO ---
+
+# --- DATOS DE SESION ---
 def formatear_cuit(cuit_num):
     if not cuit_num:
         return ""
@@ -20,10 +21,11 @@ def formatear_telefono(tel_num):
     if not tel_num:
         return ""
     s = str(tel_num)
-    # Formato visual: ej. 11 5555-5555 (según longitud)
+    # ejejmplo 11 5555-5555 (según longitud)
     if len(s) >= 10:
         return f"{s[:-8]} {s[-8:-4]}-{s[-4:]}"
     return s
+
 
 # --- AUTENTICACIÓN Y REGISTRO ---
 def registrar_inicio_sesion(id_usuario):
@@ -102,7 +104,6 @@ def auto_registrar_usuario_general(id_rol, nombre, apellido, email, password, cu
     try:
         id_cli = None
         
-        # Si es Cliente (Rol 2), primero se registra en la tabla cliente
         if id_rol == 2:
             cursor.execute("""
                 INSERT INTO cliente (cuit, razon_social, email, telefono, direccion, pais, estado_cliente) 
@@ -110,14 +111,12 @@ def auto_registrar_usuario_general(id_rol, nombre, apellido, email, password, cu
             """, (cuit, razon_social, email, telefono, direccion, pais))
             id_cli = cursor.fetchone()[0]
 
-            # Crear su cuenta corriente inicial
             cursor.execute("""
                 INSERT INTO cuenta_corriente (id_cliente, saldo, fecha_de_actualizacion)
                 VALUES (%s, 0.00, CURRENT_TIMESTAMP)
                 ON CONFLICT DO NOTHING;
             """, (id_cli,))
 
-        # Definir estado inicial del usuario (Cliente inactivo hasta aprobación, Operadores/Proveedores activos)
         estado_inicial = False if id_rol == 2 else True
 
         # Crear el Usuario vinculado
@@ -137,7 +136,8 @@ def auto_registrar_usuario_general(id_rol, nombre, apellido, email, password, cu
         conn.close()
 
 
-# --- FUNCIONES DE APOYO PARA ABM CLIENTES (Con Formato) ---
+
+# --- FUNCIONES DE APOYO PARA ABM CLIENTES ---
 def listar_clientes_formateados():
     conn = get_pg_connection()
     cursor = conn.cursor()
@@ -170,7 +170,7 @@ def crear_factura_y_actualizar_saldo(cliente_id, importe_total):
     try:
         cursor.execute(
             """INSERT INTO factura (id_cliente, importe_total, fecha_emision, estado_factura) 
-               VALUES (%s, %s, CURRENT_DATE, 'a_pagar') RETURNING id_factura;""",
+            VALUES (%s, %s, CURRENT_DATE, 'a_pagar') RETURNING id_factura;""",
             (cliente_id, importe_total)
         )
         id_factura = cursor.fetchone()[0]
@@ -188,7 +188,6 @@ def crear_factura_y_actualizar_saldo(cliente_id, importe_total):
     finally:
         cursor.close()
         conn.close()
-
 
 def registrar_envio_cliente(id_cliente, origen, destino, prioridad):
     conn = get_pg_connection()
@@ -268,10 +267,8 @@ def abm_cliente_menu():
         finally:
             cursor.close()
             conn.close()
-            
 
 # --- FUNCIONES DE ENVÍOS Y CONTENEDORES PARA CLIENTES Y OPERARIOS ---
-
 def listar_envios_cliente(id_cliente):
     conn = get_pg_connection()
     cursor = conn.cursor()
@@ -325,12 +322,28 @@ def abm_envio_contenedor_sensor_menu():
         cursor = conn.cursor()
         try:
             if op == "1":
-                cursor.execute("SELECT id_envio, id_cliente, origen_envio, destino_envio, estado_envio FROM envio ORDER BY id_envio ASC;")
+                cliente_filtrar = input_seguro("Ingresá el ID del Cliente (Dejá vacío para ver todos): ")
+                
+                query_envios = "SELECT id_envio, id_cliente, origen_envio, destino_envio, estado_envio FROM envio"
+                query_cont = "SELECT id_contenedor, id_envio, codigo_internacional, tipo_contenedor, capacidad, estado_contenedor FROM contenedor"
+                params = ()
+                
+                if cliente_filtrar:
+                    query_envios += " WHERE id_cliente = %s"
+                    query_cont += " WHERE id_envio IN (SELECT id_envio FROM envio WHERE id_cliente = %s)"
+                    params = (int(cliente_filtrar),)
+                
+                query_envios += " ORDER BY id_envio ASC;"
+                query_cont += " ORDER BY id_contenedor ASC;"
+
+                cursor.execute(query_envios, params)
                 print("\n📦 Envíos (Administrativos):")
-                for e in cursor.fetchall():
+                envios_res = cursor.fetchall()
+                if not envios_res: print("   ⚠️ Sin resultados.")
+                for e in envios_res:
                     print(f"   Envío #{e[0]} | Cliente ID: {e[1]} | {e[2]} -> {e[3]} | Estado: {e[4]}")
                     
-                cursor.execute("SELECT id_contenedor, id_envio, codigo_internacional, tipo_contenedor, capacidad, estado_contenedor FROM contenedor ORDER BY id_contenedor ASC;")
+                cursor.execute(query_cont, params)
                 print("\n🚛 Contenedores (Físicos):")
                 for c in cursor.fetchall():
                     print(f"   Contenedor #{c[0]} | Envío #{c[1]} | Cód: {c[2]} | Tipo: {c[3]} | Cap: {c[4]}kg | Estado: {c[5]}")
@@ -338,7 +351,6 @@ def abm_envio_contenedor_sensor_menu():
                 cursor.execute("SELECT id_sensor, id_contenedor, tipo_sensor, fabricante, estado_sensor FROM sensor_iot ORDER BY id_sensor ASC;")
                 print("\n📡 Sensores IoT:")
                 for s in cursor.fetchall():
-                    # Aquí cambiamos "OPERATIVO" por "ACTIVO"
                     estado_txt = "ACTIVO" if s[4] else "INACTIVO"
                     print(f"   Sensor #{s[0]} | Contenedor #{s[1]} | Tipo: {s[2]} | Fabricante: {s[3]} | Estado: {estado_txt}")
                     
@@ -403,7 +415,6 @@ def abm_envio_contenedor_sensor_menu():
             cursor.close()
             conn.close()
 
-
 def registrar_envio_con_contenedores_cliente(id_cliente, origen, destino, prioridad, lista_contenedores):
     conn = get_pg_connection()
     cursor = conn.cursor()
@@ -414,8 +425,7 @@ def registrar_envio_con_contenedores_cliente(id_cliente, origen, destino, priori
         if not est or est[0] != "ACTIVO":
             raise Exception(f"Tu cuenta está '{est[0] if est else 'INEXISTENTE'}'. Debe ser ACTIVA.")
 
-        # 2. Calcular distancia aproximada y medio de transporte según tus reglas de negocio
-        # (Aquí integramos la lógica de Neo4j o tarifas base por distancia)
+        # 2. Calcular distancia aproximada y medio de transporte
         distancia_base = 500  # Valor por defecto si no encuentra ruta directa
         medio_transporte = "TERRESTRE"
         
@@ -426,7 +436,7 @@ def registrar_envio_con_contenedores_cliente(id_cliente, origen, destino, priori
             elif prioridad == "MEDIA":
                 medio_transporte = "MARÍTIMO (Barco)"
                 distancia_base = 1500
-            else: # ALTA
+            else:
                 medio_transporte = "AÉREO (Avión)"
                 distancia_base = 800
         elif prioridad == "ALTA":
@@ -439,7 +449,7 @@ def registrar_envio_con_contenedores_cliente(id_cliente, origen, destino, priori
         
         importe_total = len(lista_contenedores) * (distancia_base * costo_unitario / 10)
 
-        # 3. Crear el Envío (Administrativo)
+        # 3. Crear el Envío
         cursor.execute("""
             INSERT INTO envio (id_cliente, origen_envio, destino_envio, fecha_creacion, estado_envio, prioridad)
             VALUES (%s, %s, %s, CURRENT_TIMESTAMP, 'EN_PREPARACION', %s) RETURNING id_envio;
@@ -453,18 +463,18 @@ def registrar_envio_con_contenedores_cliente(id_cliente, origen, destino, priori
                 VALUES (%s, %s, %s, %s, 'EN_PREPARACION');
             """, (id_env, c['codigo'], c['tipo'], c['capacidad']))
 
-        # 5. GENERACIÓN AUTOMÁTICA DE FACTURA Y ACTUALIZACIÓN DE CUENTA CORRIENTE (Transacción ACID)
+        # 5. GENERACIÓN AUTOMÁTICA DE FACTURA Y ACTUALIZACIÓN DE CUENTA CORRIENTE (ACID)
         cursor.execute(
             """INSERT INTO factura (id_cliente, importe_total, fecha_emision, estado_factura) 
-               VALUES (%s, %s, CURRENT_DATE, 'a_pagar') RETURNING id_factura;""",
+            VALUES (%s, %s, CURRENT_DATE, 'a_pagar') RETURNING id_factura;""",
             (id_cliente, importe_total)
         )
         id_factura = cursor.fetchone()[0]
 
         cursor.execute(
             """UPDATE cuenta_corriente 
-               SET saldo = saldo + %s, fecha_de_actualizacion = CURRENT_TIMESTAMP 
-               WHERE id_cliente = %s;""",
+            SET saldo = saldo + %s, fecha_de_actualizacion = CURRENT_TIMESTAMP 
+            WHERE id_cliente = %s;""",
             (importe_total, id_cliente)
         )
 
@@ -481,8 +491,8 @@ def registrar_envio_con_contenedores_cliente(id_cliente, origen, destino, priori
         conn.close()
 
 
-# --- ABM DE VEHÍCULOS ---
 
+# --- ABM DE VEHÍCULOS ---
 def registrar_vehiculo(tipo_vehiculo, identificacion, empresa_operadora, estado="DISPONIBLE"):
     """Permite a un proveedor registrar un nuevo vehículo físico en la flota."""
     conn = get_pg_connection()
@@ -527,8 +537,8 @@ def listar_vehiculos():
         conn.close()
 
 
-# --- ABM DE GRUPOS DE TRABAJO (POSTGRESQL) ---
 
+# --- ABM DE GRUPOS DE TRABAJO ---
 def registrar_grupo_trabajo(nombre, integrantes):
     """Crea un nuevo grupo de trabajo (Ej. 'Operadores Puerto', 'Choferes Norte')."""
     conn = get_pg_connection()
@@ -569,15 +579,13 @@ def listar_grupos_trabajo():
         conn.close()
 
 
-# --- REPORTES OPERATIVOS Y ANALÍTICOS (POSTGRESQL) ---
 
-
+# --- REPORTES OPERATIVOS Y ANALÍTICOS ---
 def reporte_envios_por_pais():
     """Reporte analítico: Calcula el volumen de envíos agrupados por el país/origen de salida."""
     conn = get_pg_connection()
     cursor = conn.cursor()
     try:
-        # Analizamos el campo origen_envio para agrupar por origen de salida
         cursor.execute("""
             SELECT 
                 CASE 
@@ -612,7 +620,6 @@ def reporte_envios_por_estado():
         cursor.close()
         conn.close()
 
-
 def reporte_envios_por_cliente():
     conn = get_pg_connection()
     cursor = conn.cursor()
@@ -645,7 +652,7 @@ def reporte_tiempos_por_envio():
     try:
         cursor.execute("""
             SELECT e.id_envio, e.origen_envio, e.destino_envio, e.estado_envio,
-                   EXTRACT(EPOCH FROM (t.fecha_de_llegada_estimada - t.fecha_de_salida))/86400 as dias_trayecto
+                EXTRACT(EPOCH FROM (t.fecha_de_llegada_estimada - t.fecha_de_salida))/86400 as dias_trayecto
             FROM envio e
             JOIN tramo t ON e.id_envio = t.id_envio
             ORDER BY e.id_envio ASC;
@@ -662,8 +669,8 @@ def reporte_tiempos_envio_por_cliente():
     try:
         cursor.execute("""
             SELECT c.razon_social, 
-                   MAX(EXTRACT(EPOCH FROM (t.fecha_de_llegada_estimada - t.fecha_de_salida))/86400) as max_dias,
-                   MIN(EXTRACT(EPOCH FROM (t.fecha_de_llegada_estimada - t.fecha_de_salida))/86400) as min_dias
+                MAX(EXTRACT(EPOCH FROM (t.fecha_de_llegada_estimada - t.fecha_de_salida))/86400) as max_dias,
+                MIN(EXTRACT(EPOCH FROM (t.fecha_de_llegada_estimada - t.fecha_de_salida))/86400) as min_dias
             FROM envio e
             JOIN cliente c ON e.id_cliente = c.id_cliente
             JOIN tramo t ON e.id_envio = t.id_envio
@@ -673,7 +680,6 @@ def reporte_tiempos_envio_por_cliente():
     finally:
         cursor.close()
         conn.close()
-
 
 def reporte_costos_por_tipo_transporte():
     """Reporte analítico: Calcula el uso y costo estimado por tipo de transporte usando la tabla tramo."""
@@ -690,16 +696,18 @@ def reporte_costos_por_tipo_transporte():
         cursor.close()
         conn.close()
 
+
+
+# --- FUNCIONES DE CUENTA CORRIENTE Y FACTURACIÓN ---
 def agregar_saldo_cliente(cliente_id, monto):
     """Permite al cliente recargar fondos / agregar saldo disponible a su cuenta."""
     conn = get_pg_connection()
     cursor = conn.cursor()
     try:
-        # Sumamos al saldo disponible de la cuenta corriente
         cursor.execute(
             """UPDATE cuenta_corriente 
-               SET saldo = saldo + %s, fecha_de_actualizacion = CURRENT_TIMESTAMP 
-               WHERE id_cliente = %s;""",
+            SET saldo = saldo + %s, fecha_de_actualizacion = CURRENT_TIMESTAMP 
+            WHERE id_cliente = %s;""",
             (monto, cliente_id)
         )
         conn.commit()
@@ -910,8 +918,7 @@ def consultar_cuenta_corriente(cliente_id):
             print("⚠️ Opción inválida.")
 
 
-
-
+# --- FUNCIONES DE ENVÍOS Y SENSORES PARA OPERARIOS ---
 def listar_envios_y_sensores_operario():
     """Muestra el listado completo de envíos, contenedores y sensores para el operador (Solo Lectura)."""
     conn = get_pg_connection()
@@ -1063,6 +1070,8 @@ def listar_clientes_deudores():
         cursor.close()
         conn.close()
 
+
+# --- REPORTES DE RANKING Y ANÁLISIS ---
 def ranking_clientes_por_volumen():
     """Reporte Proveedor: Suma la capacidad total de los contenedores que movió cada cliente."""
     conn = get_pg_connection()
@@ -1102,7 +1111,7 @@ def consultar_cuenta_proveedor(nombre_proveedor):
     conn = get_pg_connection()
     cursor = conn.cursor()
     try:
-        # Buscamos los vehículos del proveedor
+        # vehículos del proveedor
         cursor.execute("""
             SELECT id_vehiculo, tipo_vehiculo, identificacion, estado_vehiculo 
             FROM vehiculo 

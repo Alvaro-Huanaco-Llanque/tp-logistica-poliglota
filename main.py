@@ -29,8 +29,7 @@ from repositories.pg_repo import (
     listar_vehiculos,
     input_seguro,
     registrar_grupo_trabajo,
-    listar_grupos_trabajo,
-    reporte_tiempos_promedio_general
+    listar_grupos_trabajo
 )
 
 def menu_principal():
@@ -54,7 +53,6 @@ def menu_principal():
                 print("❌ Credenciales inválidas.")
                 continue
                 
-            # Aviso de inactividad
             if usuario_data["estado"] == "INACTIVO" or usuario_data["estado"] is False:
                 print(f"⚠️ Hola {usuario_data['nombre']}: Tu cuenta se encuentra INACTIVA. Podés entrar al panel, pero con funciones limitadas.")
                 
@@ -64,11 +62,10 @@ def menu_principal():
                 "nombre": usuario_data["nombre"],
                 "id_rol": usuario_data["id_rol"],
                 "estado": usuario_data["estado"],
-                "identificador_login": identificador # <--- AGREGA ESTA LÍNEA
+                "identificador_login": identificador
             }
             usuario_sesion["id_sesion"] = registrar_inicio_sesion(usuario_sesion["id_usuario"])
             
-            # Redirección de interfaz según el Rol
             if usuario_sesion["id_rol"] == 2:
                 menu_cliente(usuario_sesion)
             elif usuario_sesion["id_rol"] == 1:
@@ -148,10 +145,11 @@ def menu_proveedor(usuario):
         print("5. [Finanzas] Mi Cuenta Corriente y Facturación de alquileres")
         print("6. [Comunicaciones] Servicio de Mensajería")
         print("7. [Reportes] Tiempos Máximos y Mínimos de Envío por Cliente")
-        print("8. Volver al inicio (Cerrar Sesión)")
+        print("8. [IoT] Seguimiento de Sensores (Lectura)")
+        print("9. Volver al inicio (Cerrar Sesión)")
         
         try:
-            opcion = input("\nSeleccioná una opción (1-8): ").strip()
+            opcion = input("\nSeleccioná una opción (1-9): ").strip()
         except KeyboardInterrupt:
             print("\n↩️ Volviendo al menú principal...")
             break
@@ -260,14 +258,30 @@ def menu_proveedor(usuario):
                 else:
                     print("⚠️ Opción inválida.")
         elif opcion == "8":
+            print("\n--- Seguimiento IoT (Vista Proveedor) ---")
+            envio_id_input = input_seguro("ID del Envío a monitorear: ")
+            if envio_id_input:
+                envio_id = int(envio_id_input)
+                from config.database import mongo_db
+                lecturas = list(mongo_db["lecturas_sensores"].find({"envio_id": envio_id}).sort("timestamp", -1).limit(3))
+                
+                if lecturas:
+                    print(f"\n📍 [ ÚLTIMAS LECTURAS IoT - Envío #{envio_id} ]")
+                    for l in lecturas:
+                        print(f"   - {l.get('timestamp').strftime('%Y-%m-%d %H:%M:%S')} | Ubicación: {l.get('ubicacion_actual')}")
+                        print(f"     Temp: {l['metricas'].get('temperatura_c')}°C | Anomalía: {'🚨 SÍ' if l.get('alerta_anomalia') else '✅ Normal'}")
+                else:
+                    print("⚠️ No hay lecturas registradas para este envío.")
+            input("\nPresioná Enter para volver...")
+
+        elif opcion == "9":
             from repositories.pg_repo import cerrar_sesion_activa
             cerrar_sesion_activa(usuario['id_sesion'])
             print("🔒 Sesión de proveedor finalizada.")
-            break  # <-- ESTE BREAK ES EL QUE SALE DEL BUCLE DEL MENÚ
+            break
             
         else:
             print("⚠️ Opción inválida. Por favor, seleccioná un número del 1 al 8.")
-
 
 
 def menu_cliente(usuario):
@@ -276,7 +290,8 @@ def menu_cliente(usuario):
         reporte_envios_por_pais,
         reporte_envios_por_estado,
         reporte_envios_demorados,
-        reporte_costos_por_tipo_transporte
+        reporte_costos_por_tipo_transporte,
+        reporte_tiempos_promedio_general
     )
     from repositories.mongo_repo import (
         reporte_incidentes_abiertos,
@@ -318,8 +333,8 @@ def menu_cliente(usuario):
             
             print("\n--- Registrar Nuevo Envío ---")
             try:
-                origen = input_seguro("Origen [Ej: Buenos Aires]: ") or "Buenos Aires"
-                destino = input_seguro("Destino [Ej: Rosario]: ") or "Rosario"
+                origen = (input_seguro("Origen [Ej: Buenos Aires]: ") or "Buenos Aires").title()
+                destino = (input_seguro("Destino [Ej: Rosario]: ") or "Rosario").title()
                 prioridad = input_seguro("Prioridad [ALTA / MEDIA / BAJA]: ").upper() or "MEDIA"
                 
                 contenedores = []
@@ -364,7 +379,10 @@ def menu_cliente(usuario):
                 
                 from repositories.mongo_repo import generar_lectura_automatica, guardar_lectura_iot
                 from config.database import mongo_db
-                
+                from config.database import get_pg_connection
+                from repositories.neo4j_repo import buscar_camino_optimo
+
+                # 1. Generación de Telemetría
                 lectura_sim = generar_lectura_automatica(envio_id, contenedor_id=1)
                 guardar_lectura_iot(
                     contenedor_id=lectura_sim["contenedor_id"],
@@ -374,20 +392,47 @@ def menu_cliente(usuario):
                     alerta_anomalia=lectura_sim["alerta_anomalia"]
                 )
                 
-                lecturas = list(mongo_db["lecturas_sensores"].find({"envio_id": envio_id}))
-                
+                # 2. Reconstrucción Dinámica e Integración con Neo4j
+                conn = get_pg_connection()
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("SELECT origen_envio, destino_envio FROM envio WHERE id_envio = %s;", (envio_id,))
+                    info = cursor.fetchone()
+                    if info:
+                        origen = info[0].split(',')[0].strip()
+                        destino = info[1].split(',')[0].strip()
+                        
+                        print(f"\n🗺️ [ RECONSTRUCCIÓN DEL RECORRIDO - Envío #{envio_id} ]")
+                        
+                        # A) Consultamos Neo4j para el camino planificado
+                        ruta_neo4j = buscar_camino_optimo(origen, destino)
+                        if ruta_neo4j and len(ruta_neo4j) > 0:
+                            print(f"   - Camino Óptimo (Neo4j): {' -> '.join(ruta_neo4j[0]['ruta'])}")
+                        
+                        # B) Construimos el recorrido real histórico desde MongoDB
+                        historial = list(mongo_db["lecturas_sensores"].find({"envio_id": envio_id}).sort("timestamp", 1))
+                        recorrido_real = []
+                        for loc in historial:
+                            ub = loc.get('ubicacion_actual')
+                            if not recorrido_real or recorrido_real[-1] != ub:
+                                recorrido_real.append(ub)
+                                
+                        print(f"   - Recorrido Real: {' -> '.join(recorrido_real)}")
+                finally:
+                    cursor.close()
+                    conn.close()
+
+                # 3. Mostrar el historial recuperando la Batería
+                lecturas = list(mongo_db["lecturas_sensores"].find({"envio_id": envio_id}).sort("timestamp", -1).limit(5))
                 if lecturas:
-                    print(f"\n📍 Historial de Telemetría e IoT para el Envío #{envio_id}:")
+                    print(f"\n📍 [ HISTORIAL RECIENTE DE TELEMETRÍA IoT ]")
                     for l in lecturas:
-                        print(f"   - Fecha/Hora: {l.get('timestamp')}")
-                        print(f"   - Ubicación Actual (Grafo): {l.get('ubicacion_actual')}")
-                        print(f"   - Métrica Temperatura: {l['metricas'].get('temperatura_c')} °C")
-                        print(f"   - Métrica Humedad: {l['metricas'].get('humedad_pct')}%")
-                        print(f"   - Métrica Batería: {l['metricas'].get('bateria_pct')}%")
-                        print(f"   - Alerta Anomalía: {'🚨 SÍ' * l.get('alerta_anomalia', False) or '✅ Normal'}")
-                        print("-" * 40)
+                        print(f"   - Fecha/Hora: {l.get('timestamp').strftime('%Y-%m-%d %H:%M:%S')} | Ubicación: {l.get('ubicacion_actual')}")
+                        print(f"   - Temp: {l['metricas'].get('temperatura_c')} °C | Humedad: {l['metricas'].get('humedad_pct')}% | Batería: {l['metricas'].get('bateria_pct')}%")
+                        print(f"   - Anomalía: {'🚨 SÍ' if l.get('alerta_anomalia') else '✅ Normal'}")
+                        print("-" * 50)
                 else:
-                    print("⚠️ No se encontraron lecturas IoT registradas para este envío.")
+                    print("⚠️ No se encontraron lecturas.")
                     
             except KeyboardInterrupt:
                 continue
@@ -405,11 +450,11 @@ def menu_cliente(usuario):
                 print("\n--- 📊 SOLICITUD DE REPORTES (COSTO: $2500) ---")
                 print("1. Análisis Predictivos (Atrasos y Riesgos) [MongoDB]")
                 print("2. Tiempo Promedio Global de Entrega [PostgreSQL]")
-                print("3. Envíos por Estado (Entregados, Demorados, En Tránsito) [PostgreSQL]") # <--- NUEVO REPORTE
+                print("3. Envíos por Estado (Entregados, Demorados, En Tránsito) [PostgreSQL]")
                 print("4. Envíos Demorados [PostgreSQL]")
                 print("5. Incidentes Abiertos [MongoDB]")
                 print("6. Costos por Tipo de Transporte [PostgreSQL]")
-                print("7. Envíos por País de Origen [PostgreSQL]") # <--- TEXTO ACTUALIZADO (ORIGEN)
+                print("7. Envíos por País de Origen [PostgreSQL]")
                 
                 sel_rep = input_seguro("Seleccioná un reporte (1-7) [Enter por defecto 1]: ").strip() or "1"
                 
@@ -507,11 +552,9 @@ def menu_cliente(usuario):
 
                 print(f"=============================================\n")
 
-                # Guardamos el reporte final en MongoDB
                 contenido_json = {"datos_extraidos": contenido_guardar}
                 guardar_reporte(usuario['nombre'], tipo_rep_str, contenido_json, formato)
                 
-                # Descontamos el saldo de su cuenta corriente en PostgreSQL
                 fact_id = crear_factura_y_actualizar_saldo(usuario['id_cliente'], 2500.00)
                 print(f"✅ Reporte '{tipo_rep_str}' almacenado con éxito.")
                 print(f"📄 Se emitió la Factura #{fact_id} por el cargo de $2500.00.")
@@ -547,7 +590,6 @@ def menu_cliente(usuario):
             print("⚠️ Opción inválida.")
 
 
-
 def menu_operario(usuario):
     while True:
         print("\n=======================================================")
@@ -557,8 +599,8 @@ def menu_operario(usuario):
         print("2. [IoT y Trayectos] Monitoreo de Sensores, Alertas y Rutas")
         print("3. [Finanzas ACID] Cuentas Corrientes, Facturación y Pagos")
         print("4. [Analítica y Reportes] Rankings y Predicción de Riesgos")
-        print("5. [Comunicaciones] Servicio de Mensajería Global") # <--- NUEVA OPCIÓN
-        print("6. Volver al inicio (Cerrar Sesión)") # <--- PASA A SER LA 6
+        print("5. [Comunicaciones] Servicio de Mensajería Global")
+        print("6. Volver al inicio (Cerrar Sesión)")
         
         opcion = input("\nSeleccioná un módulo (1-6): ").strip()
         
@@ -571,7 +613,6 @@ def menu_operario(usuario):
         elif opcion == "4":
             submenu_analitica_operario()
         elif opcion == "5":
-            # BLOQUE DE MENSAJERÍA IDÉNTICO AL DEL CLIENTE/PROVEEDOR
             from repositories.mongo_repo import enviar_mensaje, obtener_mensajes
             from repositories.pg_repo import input_seguro
             print("\n--- 💬 Servicio de Mensajería ---")
@@ -627,7 +668,6 @@ def submenu_abm_operario():
 
 
 def submenu_iot_y_trayectos():
-    """Menú del operador para Eventos, Incidentes y Seguimiento en MongoDB/Redis"""
     while True:
         print("\n--- [2. Monitoreo IoT, Alertas y Trayectos] ---")
         print("1. Consultar Posición Actual GPS de un Envío (MongoDB)")
@@ -648,25 +688,54 @@ def submenu_iot_y_trayectos():
             
         try:
             if op == "1":
-                print("\n--- Consulta de Posición GPS Actual ---")
+                print("\n--- Consulta de Posición GPS y Recorrido ---")
                 envio_id_input = input_seguro("Ingresá el ID del Envío a consultar: ")
                 if not envio_id_input:
                     continue
                 envio_id = int(envio_id_input)
                 
                 from config.database import mongo_db
-                # Buscamos exclusivamente la última posición registrada/generada para ese envío
-                ultima_lectura = mongo_db["lecturas_sensores"].find_one(
-                    {"envio_id": envio_id}, 
-                    sort=[("timestamp", -1)]
-                )
-                
+                from config.database import get_pg_connection
+                from repositories.neo4j_repo import buscar_camino_optimo
+
+                ultima_lectura = mongo_db["lecturas_sensores"].find_one({"envio_id": envio_id}, sort=[("timestamp", -1)])
+
                 if ultima_lectura:
-                    print(f"\n📍 [POSICIÓN GPS ACTUAL - Envío #{envio_id}]")
-                    print(f"   - Última ubicación detectada: {ultima_lectura.get('ubicacion_actual')}")
+                    conn = get_pg_connection()
+                    cursor = conn.cursor()
+                    try:
+                        cursor.execute("SELECT origen_envio, destino_envio FROM envio WHERE id_envio = %s;", (envio_id,))
+                        info = cursor.fetchone()
+                        if info:
+                            origen = info[0].split(',')[0].strip()
+                            destino = info[1].split(',')[0].strip()
+                            
+                            print(f"\n🗺️ [ RECONSTRUCCIÓN DEL RECORRIDO - Envío #{envio_id} ]")
+                            
+                            # A) Consultamos Neo4j para el camino planificado
+                            ruta_neo4j = buscar_camino_optimo(origen, destino)
+                            if ruta_neo4j and len(ruta_neo4j) > 0:
+                                print(f"   - Camino Óptimo (Neo4j): {' -> '.join(ruta_neo4j[0]['ruta'])}")
+                            
+                            # B) Construimos el recorrido real histórico
+                            historial = list(mongo_db["lecturas_sensores"].find({"envio_id": envio_id}).sort("timestamp", 1))
+                            recorrido_real = []
+                            for loc in historial:
+                                ub = loc.get('ubicacion_actual')
+                                if not recorrido_real or recorrido_real[-1] != ub:
+                                    recorrido_real.append(ub)
+                                    
+                            print(f"   - Recorrido Real: {' -> '.join(recorrido_real)}")
+                    finally:
+                        cursor.close()
+                        conn.close()
+
+                    print(f"\n📍 [POSICIÓN GPS ACTUAL]")
+                    print(f"   - Ubicación: {ultima_lectura.get('ubicacion_actual')}")
+                    print(f"   - Temp: {ultima_lectura['metricas'].get('temperatura_c')} °C | Batería: {ultima_lectura['metricas'].get('bateria_pct')}%")
                     print(f"   - Sincronizado: {ultima_lectura.get('timestamp')}")
                 else:
-                    print(f"⚠️ No hay registros de posición GPS para el Envío #{envio_id}. (Asegurate de que el cliente haya consultado el seguimiento al menos una vez).")
+                    print(f"⚠️ No hay registros de posición GPS recientes para el Envío #{envio_id}.")
                 
             elif op == "2":
                 print("\n--- Nuevo Evento Logístico ---")
@@ -711,22 +780,22 @@ def submenu_iot_y_trayectos():
             print(f"❌ Error inesperado: {e}")
 
 
-
 def submenu_finanzas_operario():
     while True:
         print("\n--- [3. Finanzas, Auditoría y Cuentas Corrientes] ---")
         print("1. Auditar Cuenta Corriente de un Cliente (Solo Lectura)")
         print("2. Ver Reporte Global de Clientes Deudores")
         print("3. Emitir Factura / Cargo Manual (Transacción ACID)")
-        print("4. Volver")
+        print("4. Ejecutar Cierre Mensual de Cuentas Corrientes")
+        print("5. Volver")
         
         try:
-            op = input_seguro("Elegí una opción (1-4): ").strip()
+            op = input_seguro("Elegí una opción (1-5): ").strip()
         except KeyboardInterrupt:
             print("\n↩️ Volviendo...")
             break
             
-        if op == "4":
+        if op == "5":
             break
             
         try:
@@ -751,11 +820,14 @@ def submenu_finanzas_operario():
                     continue
                 importe = float(importe_input)
                 
-                # Llama a la función ACID en pg_repo
                 from repositories.pg_repo import crear_factura_y_actualizar_saldo
                 id_factura = crear_factura_y_actualizar_saldo(cid, importe)
                 print(f"✅ Factura Administrativa #{id_factura} emitida con éxito para el Cliente #{cid}.")
-                print("   Se actualizó de forma atómica la deuda acumulada del cliente en PostgreSQL.")
+                
+            elif op == "4":
+                from repositories.pg_repo import ejecutar_cierre_mensual_cuentas
+                ejecutar_cierre_mensual_cuentas()
+                input("\nPresioná Enter para continuar...")
                 
         except ValueError:
             print("❌ Error: Ingrese un valor numérico válido.")
@@ -764,6 +836,7 @@ def submenu_finanzas_operario():
             continue
         except Exception as e:
             print(f"❌ Error financiero: {e}")
+
 
 def submenu_analitica_operario():
     while True:
@@ -804,10 +877,6 @@ def submenu_analitica_operario():
             print("\n🕸️ [ RED DE RELACIONES Y TRAZABILIDAD - GRAFO NEO4J ]")
             print("Analizando dependencias logísticas (Cliente -> Envío -> Vehículo -> Operador)...")
             
-            # Aquí simulamos el resultado de la consulta Cypher para la presentación
-            # Si en el futuro conectas la DB Neo4j real, aquí iría el driver ejecutando el MATCH.
-            
-            # Simulamos que la DB nos devolvió 3 relaciones clave:
             relaciones_simuladas = [
                 {"cliente": "Juan Pérez", "envio_id": 1, "vehiculo": "Camión Volvo (XF-112)", "operador": "Carlos Operador"},
                 {"cliente": "Empresa Logística S.A.", "envio_id": 2, "vehiculo": "Buque Carguero (AR-99)", "operador": "Ana Chofer"},
@@ -817,13 +886,11 @@ def submenu_analitica_operario():
             print("\nResultados de la trazabilidad:")
             for rel in relaciones_simuladas:
                 print(f"   - El Cliente '{rel['cliente']}' contrató el Envío #{rel['envio_id']}, "
-                      f"el cual fue transportado en el {rel['vehiculo']} conducido por '{rel['operador']}'.")
+                    f"el cual fue transportado en el {rel['vehiculo']} conducido por '{rel['operador']}'.")
             
-            print("\n💡 Conclusión Operativa: Carlos Operador maneja la mayoría de la carga de Juan Pérez. "
-                  "Si hay incidentes recurrentes, la auditoría debe enfocarse en ese binomio.")
+            print("\n💡 Conclusión Operativa: Carlos Operador maneja la mayoría de la carga.")
         else:
             print("⚠️ Opción inválida.")
-
 
 
 if __name__ == "__main__":
