@@ -1,131 +1,111 @@
 from config.database import mongo_db
+from repositories.redis_repo import actualizar_ultima_posicion
 from datetime import datetime
 import random
 
 # --- MÓDULO IoT Y TELEMETRÍA (sensor) ---
-def generar_lectura_automatica(id_envio, contenedor_id):
-    """Genera una lectura IoT simulada con rutas lógicas, batería descendente y estados sincronizados."""
+
+def generar_lectura_iot_coordenadas(id_envio, id_contenedor, id_sensor=1):
+    """
+    Obtiene los Hubs de Neo4j para el envío, calcula la coordenada (lat, lon) real,
+    actualiza Redis en tiempo real y persiste el histórico en MongoDB.
+    """
     from config.database import get_pg_connection
     from repositories.neo4j_repo import buscar_camino_optimo
-    
+
     conn = get_pg_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT origen_envio, destino_envio, estado_envio, prioridad FROM envio WHERE id_envio = %s;", (id_envio,))
+        cursor.execute("SELECT origen_envio, destino_envio, estado_envio FROM envio WHERE id_envio = %s;", (id_envio,))
         envio_info = cursor.fetchone()
     finally:
         cursor.close()
         conn.close()
-        
-    origen = "Buenos Aires"
-    destino = "Rosario"
-    estado_envio = "EN_TRANSITO"
-    prioridad = "MEDIA"
-    
-    if envio_info:
-        origen, destino, estado_envio, prioridad = envio_info[0], envio_info[1], envio_info[2], envio_info[3]
 
-    origen_limpio = origen.split(",")[0].strip()
-    destino_limpio = destino.split(",")[0].strip()
+    origen = envio_info[0] if envio_info else "BUE"
+    destino = envio_info[1] if envio_info else "SCL"
+    estado_envio = envio_info[2] if envio_info else "EN_TRANSITO"
 
-    # Formatear la primera letra en mayúscula para ayudar a Neo4j si se tipeó en minúscula
-    origen_formateado = origen_limpio.title()
-    destino_formateado = destino_limpio.title()
-
-    if estado_envio == "ENTREGADO":
-        ubicacion_actual = destino_limpio
+    ruta_neo4j = buscar_camino_optimo(origen, destino)
+    if ruta_neo4j and len(ruta_neo4j[0]["puntos_gps"]) > 0:
+        puntos_gps = ruta_neo4j[0]["puntos_gps"]
     else:
-        # 1. Intentar usar la lógica de Neo4j para la ruta (usando nombres formateados)
-        ruta_neo4j = buscar_camino_optimo(origen_formateado, destino_formateado)
-        
-        if ruta_neo4j and len(ruta_neo4j) > 0 and len(ruta_neo4j[0]['ruta']) > 1:
-            secuencia_ruta = ruta_neo4j[0]['ruta']
-        else:
-            # 2. Lógica de respaldo robusta si Neo4j no tiene la ruta
-            is_transoceanico = "España" in destino_formateado or "Madrid" in destino_formateado
-            is_maritimo_patagonico = "Malvinas" in origen_formateado or "Atlántico" in origen_formateado or "Malvinas" in destino_formateado
-            
-            if is_transoceanico:
-                escala_3 = "En Vuelo Transatlántico (Avión)" if prioridad.upper() == "ALTA" else "En Tránsito Marítimo (Buque)"
-                secuencia_ruta = [origen_limpio, "Aduana Internacional", escala_3, destino_limpio]
-            elif is_maritimo_patagonico:
-                secuencia_ruta = [origen_limpio, "Puerto Comodoro Rivadavia", "Mar Argentino", destino_limpio]
-            else:
-                secuencia_ruta = [origen_limpio, "Tránsito Intermedio", destino_limpio]
+        # Fallback con coordenadas reales si no matchea el nombre exacto
+        puntos_gps = [
+            {"codigo": "BUE", "nombre": "Puerto Buenos Aires", "lat": -34.5885, "lon": -58.3702},
+            {"codigo": "ROS", "nombre": "Centro Distribución Rosario", "lat": -32.9442, "lon": -60.6505},
+            {"codigo": "COR", "nombre": "Hub Logístico Córdoba", "lat": -31.4201, "lon": -64.1888},
+            {"codigo": "MDZ", "nombre": "Aduana Mendoza", "lat": -32.8277, "lon": -70.0706},
+            {"codigo": "SCL", "nombre": "Puerto San Antonio Chile", "lat": -33.5933, "lon": -71.6153}
+        ]
 
-        coleccion_lecturas = mongo_db["lecturas_sensores"]
-        total_lecturas_previas = coleccion_lecturas.count_documents({"envio_id": id_envio})
-        
-        indice_ruta = min(total_lecturas_previas, len(secuencia_ruta) - 1)
-        ubicacion_actual = secuencia_ruta[indice_ruta]
-        
-        # --- SINCRONIZACIÓN DE ESTADOS (ENVÍO Y CONTENEDORES) ---
-        conn_pg = get_pg_connection()
-        cur_pg = conn_pg.cursor()
-        try:
-            # A. Si arranca el viaje (primera lectura que no sea el origen), pasa a EN_TRANSITO
-            if indice_ruta > 0 and estado_envio == "EN_PREPARACION":
-                cur_pg.execute("UPDATE envio SET estado_envio = 'EN_TRANSITO' WHERE id_envio = %s;", (id_envio,))
-                cur_pg.execute("UPDATE contenedor SET estado_contenedor = 'EN_TRANSITO' WHERE id_envio = %s;", (id_envio,))
-                conn_pg.commit()
-                
-            # B. Si llega al destino, pasa a ENTREGADO y DESCARGADO
-            if indice_ruta >= len(secuencia_ruta) - 1 and estado_envio != "ENTREGADO":
-                cur_pg.execute("UPDATE envio SET estado_envio = 'ENTREGADO' WHERE id_envio = %s;", (id_envio,))
-                cur_pg.execute("UPDATE contenedor SET estado_contenedor = 'DESCARGADO' WHERE id_envio = %s;", (id_envio,))
-                conn_pg.commit()
-                print(f"\n🎉 [ACT AUTOMÁTICA]: El Envío #{id_envio} ha completado su ruta y ahora figura como ENTREGADO.")
-        except Exception as e:
-            conn_pg.rollback()
-        finally:
-            cur_pg.close()
-            conn_pg.close()
+    coleccion_lecturas = mongo_db["lecturas_sensores"]
+    lecturas_previas = coleccion_lecturas.count_documents({"envio_id": id_envio})
+    indice = min(lecturas_previas, len(puntos_gps) - 1)
+    nodo_actual = puntos_gps[indice]
 
-    # --- CONTROL DE BATERÍA DESCENDENTE ---
-    ultima_lectura = mongo_db["lecturas_sensores"].find_one(
-        {"envio_id": id_envio, "contenedor_id": contenedor_id},
-        sort=[("timestamp", -1)]
-    )
-    
-    if ultima_lectura and "metricas" in ultima_lectura:
-        bateria_anterior = ultima_lectura["metricas"].get("bateria_pct", 100)
-        bateria = max(0, bateria_anterior - random.randint(1, 3))
-    else:
-        bateria = 100
+    # Pequeña deriva GPS realista si está en tránsito entre nodos
+    lat_real = round(nodo_actual["lat"] + random.uniform(-0.015, 0.015), 6)
+    lon_real = round(nodo_actual["lon"] + random.uniform(-0.015, 0.015), 6)
 
-    es_anomalia = random.random() < 0.10 
-    temperatura = round(random.uniform(15.0, 25.0) if es_anomalia else random.uniform(-20.0, 4.0), 2)
-    humedad = round(random.uniform(40.0, 80.0), 2)
-    vibracion = round(random.uniform(0.01, 0.50), 2)
-    
-    lectura_simulada = {
+    # Batería descendente
+    ultima = coleccion_lecturas.find_one({"envio_id": id_envio}, sort=[("timestamp", -1)])
+    bateria_ant = ultima["metricas"].get("bateria_pct", 100) if (ultima and "metricas" in ultima) else 100
+    bateria = max(5, bateria_ant - random.randint(1, 4))
+
+    # Consultar regla de temperatura activa en MongoDB
+    regla_temp = mongo_db["reglas_iot"].find_one({"parametro": "TEMPERATURA"})
+    umbral_temp = regla_temp["umbral_maximo"] if regla_temp else 8.0
+
+    es_anomalia = random.random() < 0.20
+    temperatura = round(random.uniform(umbral_temp + 2.0, 22.0) if es_anomalia else random.uniform(-18.0, umbral_temp - 1.0), 2)
+    humedad = round(random.uniform(45.0, 75.0), 2)
+    vibracion = round(random.uniform(0.02, 0.45), 2)
+
+    alerta_disparada = temperatura > umbral_temp or bateria < 15
+
+    # 1. Guardar en MongoDB (Histórico)
+    documento = {
         "envio_id": id_envio,
-        "contenedor_id": contenedor_id,
+        "contenedor_id": id_contenedor,
+        "sensor_id": id_sensor,
         "timestamp": datetime.utcnow(),
-        "ubicacion_actual": ubicacion_actual, 
+        "ubicacion_actual": nodo_actual["nombre"],
+        "coordenadas_gps": {
+            "lat": lat_real,
+            "lon": lon_real
+        },
         "metricas": {
             "temperatura_c": temperatura,
             "humedad_pct": humedad,
             "bateria_pct": bateria,
             "vibracion_g": vibracion
         },
-        "alerta_anomalia": es_anomalia 
+        "alerta_anomalia": alerta_disparada
     }
-    return lectura_simulada
+    coleccion_lecturas.insert_one(documento)
 
-def guardar_lectura_iot(contenedor_id, envio_id, ubicacion_actual, metricas, alerta_anomalia=False):
-    """Inserta un documento de telemetría IoT simplificado en MongoDB vinculado al grafo."""
-    coleccion = mongo_db["lecturas_sensores"]
-    documento = {
-        "envio_id": envio_id,
-        "contenedor_id": contenedor_id,
-        "timestamp": datetime.utcnow(),
-        "ubicacion_actual": ubicacion_actual,
-        "metricas": metricas,
-        "alerta_anomalia": alerta_anomalia
-    }
-    resultado = coleccion.insert_one(documento)
-    return resultado.inserted_id
+    # 2. Actualizar Redis (Caché de última posición GPS real)
+    actualizar_ultima_posicion(
+        id_sensor=id_sensor,
+        id_contenedor=id_contenedor,
+        id_envio=id_envio,
+        lat=lat_real,
+        lon=lon_real,
+        hub_nombre=nodo_actual["nombre"],
+        temp=temperatura,
+        humedad=humedad,
+        bateria=bateria
+    )
+
+    # 3. Si viola umbral, generar alerta automática e incidente
+    if temperatura > umbral_temp:
+        registrar_alerta(id_sensor, f"EXCESO_TEMPERATURA ({temperatura}°C > {umbral_temp}°C)")
+    if bateria < 15:
+        registrar_alerta(id_sensor, f"BATERIA_CRITICA ({bateria}%)")
+
+    return documento
+
 
 
 # --- MÓDULO LOGÍSTICO Y OPERATIVO ---
@@ -338,7 +318,44 @@ def abm_reglas_y_alertas_menu():
             mongo_db["alertas"].update_many({"id_sensor": id_s, "estado": "ACTIVA"}, {"$set": {"estado": "RESUELTA"}})
             print(f"✅ Alertas del Sensor #{id_s} marcadas como RESUELTAS.")
 
+def reporte_promedio_incidentes_multicriterio():
+    """Cruza incidentes de MongoDB con datos de Envío y Cliente de PostgreSQL para calcular promedios por País, Estado y Cliente."""
+    from config.database import get_pg_connection
+    incidentes = list(mongo_db["incidentes"].find())
+    
+    conn = get_pg_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT e.id_envio, e.estado_envio, c.pais, c.razon_social
+            FROM envio e
+            JOIN cliente c ON e.id_cliente = c.id_cliente;
+        """)
+        envios_pg = cursor.fetchall()
+    finally:
+        cursor.close()
+        conn.close()
 
+    if not envios_pg:
+        return {}
+
+    conteo_por_envio = {}
+    for inc in incidentes:
+        eid = inc.get("id_envio")
+        conteo_por_envio[eid] = conteo_por_envio.get(eid, 0) + 1
+
+    por_pais, por_estado, por_cliente = {}, {}, {}
+    for eid, estado, pais, cliente in envios_pg:
+        cant = conteo_por_envio.get(eid, 0)
+        por_pais.setdefault(pais or "Argentina", []).append(cant)
+        por_estado.setdefault(estado, []).append(cant)
+        por_cliente.setdefault(cliente, []).append(cant)
+
+    return {
+        "por_pais": {k: round(sum(v)/len(v), 2) for k, v in por_pais.items()},
+        "por_estado": {k: round(sum(v)/len(v), 2) for k, v in por_estado.items()},
+        "por_cliente": {k: round(sum(v)/len(v), 2) for k, v in por_cliente.items()}
+    }
 
 
 

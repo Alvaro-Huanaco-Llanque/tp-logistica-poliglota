@@ -1,897 +1,446 @@
-from repositories.redis_repo import actualizar_ultima_posicion, obtener_ultima_posicion
+from config.database import get_pg_connection, mongo_db
+from repositories.pg_repo import (
+    obtener_usuario_por_rol,
+    registrar_inicio_sesion,
+    cerrar_sesion_activa,
+    abm_cliente_menu,
+    abm_usuarios_y_sesiones_menu,
+    abm_proveedores_menu,
+    abm_operadores_logisticos_menu,
+    abm_envio_contenedor_sensor_menu,
+    registrar_envio_con_contenedores_cliente,
+    consultar_cuenta_corriente,
+    listar_clientes_deudores,
+    ejecutar_cierre_mensual_cuentas,
+    gestionar_pagos_proveedores_y_operadores_menu,
+    reporte_envios_por_pais,
+    reporte_envios_por_estado,
+    reporte_envios_por_cliente,
+    reporte_envios_demorados,
+    reporte_tiempos_envio_por_cliente,
+    reporte_tiempos_promedio_general,
+    reporte_costos_por_tipo_transporte,
+    ranking_clientes_por_volumen,
+    analisis_historico_desempeno,
+    listar_clientes_formateados,
+    HUBS_PAIS,
+    input_seguro
+)
 from repositories.mongo_repo import (
-    guardar_lectura_iot, 
-    generar_lectura_automatica,
+    generar_lectura_iot_coordenadas,
     registrar_evento_logistico,
     obtener_historial_eventos,
     registrar_incidente,
     obtener_incidentes_por_envio,
+    abm_reglas_y_alertas_menu,
+    deteccion_anomalias_temperatura,
+    ranking_rutas_incidentes,
+    reporte_incidentes_abiertos,
+    reporte_analisis_predictivos,
+    reporte_promedio_incidentes_multicriterio,
+    registrar_prediccion_riesgo,
     enviar_mensaje,
-    obtener_mensajes,
-    guardar_reporte,
-    listar_reportes_usuario
+    obtener_mensajes
 )
-from repositories.neo4j_repo import buscar_camino_optimo
-from repositories.pg_repo import (
-    registrar_inicio_sesion,
-    cerrar_sesion_activa,
-    obtener_estado_cliente,
-    login_general,
-    auto_registrar_usuario_general,
-    crear_factura_y_actualizar_saldo,
-    abm_cliente_menu,
-    abm_envio_contenedor_sensor_menu,
-    consultar_cuenta_corriente,
-    registrar_envio_cliente,
-    listar_envios_cliente,
-    registrar_envio_con_contenedores_cliente,
-    registrar_vehiculo,
-    listar_vehiculos,
-    input_seguro,
-    registrar_grupo_trabajo,
-    listar_grupos_trabajo
-)
+from repositories.neo4j_repo import obtener_red_relaciones_grafo
+from repositories.redis_repo import obtener_ultima_posicion_envio
+
+ROLES_ERP = {
+    1: "GERENTE_OPERACIONES (Gestión de Maestros, Usuarios y Comunicaciones)",
+    2: "GESTOR_TRAFICO_IOT (Envíos, Contenedores, Rutas, Monitoreo GPS e Incidentes)",
+    3: "ANALISTA_FINANZAS (Cuentas Corrientes, Facturación, Cobros y Pagos)",
+    4: "ANALISTA_REPORTES (Reportes Operativos, Analíticos, Grafo y Predicciones)"
+}
+
+# Permisos estrictos por Rol: Cada rol solo ve y ejecuta sus módulos asignados
+MODULOS_POR_ROL = {
+    1: ["1", "5"],          # Gerente Operaciones: Maestros/Usuarios/Sesiones y Comunicaciones
+    2: ["2", "3", "4", "5"],# Gestor Tráfico IoT: Envíos, Monitoreo GPS/Eventos, Alertas/Incidentes y Comunicaciones
+    3: ["7", "5"],          # Analista Finanzas: Cuentas Corrientes/Facturación/Pagos y Comunicaciones
+    4: ["6", "5"]           # Analista Reportes: Inteligencia Analítica/Predictiva/Grafo y Comunicaciones
+}
 
 def menu_principal():
     while True:
-        print("\n=======================================================")
-        print("   SISTEMA DE LOGÍSTICA POLÍGLOTA - INICIO DE SESIÓN")
-        print("=======================================================")
-        print("1. Iniciar Sesión (Cliente, Operador Logístico o Proveedor)")
-        print("2. Registrarse en el Sistema")
-        print("3. Salir")
-        
-        op = input("\nSeleccioná una opción (1-3): ").strip()
-        
-        if op == "1":
-            print("\n--- INICIO DE SESIÓN ---")
-            identificador = input("Ingresá tu CUIT (si sos Cliente) o tu Email (Operador/Proveedor): ")
-            password = input("Contraseña: ")
-            
-            usuario_data = login_general(identificador, password)
-            if not usuario_data:
-                print("❌ Credenciales inválidas.")
+        print("\n==================================================================")
+        print("   ERP INTERNO DE GESTIÓN LOGÍSTICA POLÍGLOTA (SELECCIÓN DE ROL)")
+        print("==================================================================")
+        print("Seleccioná el Rol Interno con el que deseás operar en la terminal:")
+        print("  1. GERENTE_OPERACIONES (ABM Clientes, Proveedores, Operadores, Usuarios y Sesiones)")
+        print("  2. GESTOR_TRAFICO_IOT  (Registro de Envíos, Sensores IoT, Eventos, Rutas y Alertas)")
+        print("  3. ANALISTA_FINANZAS   (Cuentas Corrientes, Facturación, Cobros, Pagos y Cierre)")
+        print("  4. ANALISTA_REPORTES   (Reportes Analíticos, Costos, Grafo Neo4j y Predicciones)")
+        print("  5. Salir del Sistema")
+
+        op = input("\nIngresá una opción (1-5): ").strip()
+
+        if op in ["1", "2", "3", "4"]:
+            rol_id = int(op)
+            usuario = obtener_usuario_por_rol(rol_id)
+            if not usuario:
+                print("❌ No hay un empleado activo asignado a este rol. Ejecutá primero 'python seed_datos_prueba.py'.")
                 continue
-                
-            if usuario_data["estado"] == "INACTIVO" or usuario_data["estado"] is False:
-                print(f"⚠️ Hola {usuario_data['nombre']}: Tu cuenta se encuentra INACTIVA. Podés entrar al panel, pero con funciones limitadas.")
-                
-            usuario_sesion = {
-                "id_usuario": usuario_data["id_usuario"],
-                "id_cliente": usuario_data.get("id_cliente"),
-                "nombre": usuario_data["nombre"],
-                "id_rol": usuario_data["id_rol"],
-                "estado": usuario_data["estado"],
-                "identificador_login": identificador
-            }
-            usuario_sesion["id_sesion"] = registrar_inicio_sesion(usuario_sesion["id_usuario"])
-            
-            if usuario_sesion["id_rol"] == 2:
-                menu_cliente(usuario_sesion)
-            elif usuario_sesion["id_rol"] == 1:
-                menu_operario(usuario_sesion)
-            elif usuario_sesion["id_rol"] == 3:
-                menu_proveedor(usuario_sesion)
-            
-        elif op == "2":
-            menu_registro()
-            
-        elif op == "3":
-            print("\n👋 ¡Saliendo del sistema!")
+            usuario["id_sesion"] = registrar_inicio_sesion(usuario["id_usuario"])
+            panel_central_erp(usuario)
+        elif op == "5":
+            print("👋 Cerrando ERP Logístico.")
             break
         else:
             print("⚠️ Opción inválida.")
 
+def panel_central_erp(usuario):
+    rol_id = usuario["id_rol"]
+    rol_nombre = ROLES_ERP.get(rol_id, "OPERADOR_ERP")
+    permitidos = MODULOS_POR_ROL.get(rol_id, [])
 
-def menu_registro():
-    print("\n=======================================================")
-    print("   REGISTRO EN EL SISTEMA")
-    print("=======================================================")
-    print("1. Registrarse como NUEVO CLIENTE (Empresa que contrata envíos)")
-    print("2. Registrarse como NUEVO OPERADOR LOGÍSTICO (Chofer/Administrativo)")
-    print("3. Registrarse como NUEVO PROVEEDOR (Dueño de flota, contenedores o sensores)")
-    print("4. Volver")
-    tipo = input("Seleccioná una opción (1-4): ").strip()
-    
-    if tipo == "1":
-        try:
-            razon = input("Razón Social de la Empresa: ")
-            cuit = int(input("CUIT (solo números, ej: 20123456789): "))
-            email = input("Email de contacto: ")
-            tel = int(input("Teléfono (solo números, ej: 1155555555): "))
-            direccion = input("Dirección: ")
-            pais = input("País [Enter para Argentina]: ") or "Argentina"
-            nombre_cont = input("Nombre de la persona de contacto: ")
-            apellido_cont = input("Apellido de la persona de contacto: ")
-            password = input("Contraseña para el sistema: ")
-            
-            id_usr = auto_registrar_usuario_general(
-                id_rol=2, nombre=nombre_cont, apellido=apellido_cont, email=email, 
-                password=password, cuit=cuit, razon_social=razon, telefono=tel, 
-                direccion=direccion, pais=pais
-            )
-            print(f"\n✅ ¡Registro de Cliente exitoso! Tu cuenta está INACTIVA a la espera de aprobación.")
-        except Exception as e:
-            print(f"❌ Error al registrar cliente: {e}")
-            
-    elif tipo in ["2", "3"]:
-        rol_desc = "Operador Logístico" if tipo == "2" else "Proveedor"
-        id_rol_asig = 1 if tipo == "2" else 3
-        try:
-            nombre = input("Nombre: ")
-            apellido = input("Apellido: ")
-            email = input("Email: ")
-            password = input("Contraseña: ")
-            
-            id_usr = auto_registrar_usuario_general(
-                id_rol=id_rol_asig, nombre=nombre, apellido=apellido, 
-                email=email, password=password
-            )
-            print(f"\n✅ ¡{rol_desc} registrado con éxito! Ya podés iniciar sesión con tu Email.")
-        except Exception as e:
-            print(f"❌ Error al registrar {rol_desc}: {e}")
-
-
-def menu_proveedor(usuario):
-    """Menú principal para el Rol 3: Proveedor (Gestión integral de flota, clientes y operaciones)"""
-    while True:
-        print("\n=======================================================")
-        print(f"   PORTAL DE PROVEEDOR: {usuario['nombre']} | Sesión #{usuario['id_sesion']}")
-        print("=======================================================")
-        print("1. [Gestión Flota] Registrar y Listar Vehículos")
-        print("2. [Gestión Clientes] ABM Clientes (Dar de alta, suspender, listar)")
-        print("3. [Gestión Operativa] Envíos, Contenedores, Sensores y Estados")
-        print("4. [Gestión Grupos] Crear y Listar Grupos de Trabajo")
-        print("5. [Finanzas] Mi Cuenta Corriente y Facturación de alquileres")
-        print("6. [Comunicaciones] Servicio de Mensajería")
-        print("7. [Reportes] Tiempos Máximos y Mínimos de Envío por Cliente")
-        print("8. [IoT] Seguimiento de Sensores (Lectura)")
-        print("9. Volver al inicio (Cerrar Sesión)")
-        
-        try:
-            opcion = input("\nSeleccioná una opción (1-9): ").strip()
-        except KeyboardInterrupt:
-            print("\n↩️ Volviendo al menú principal...")
-            break
-            
-        if opcion == "1":
-            while True:
-                print("\n--- Gestión de Vehículos ---")
-                print("1. Registrar Nuevo Vehículo")
-                print("2. Listar Mis Vehículos Físicos")
-                print("3. Volver")
-                sub_v = input_seguro("Elegí una opción: ")
-                if sub_v == "1":
-                    tipo = input_seguro("Tipo de Vehículo (ej. Camión, Barco, Avión): ")
-                    identificacion = input_seguro("Matrícula o Identificación: ")
-                    registrar_vehiculo(tipo, identificacion, usuario['nombre'])
-                elif sub_v == "2":
-                    listar_vehiculos()
-                elif sub_v == "3":
-                    break
-                    
-        elif opcion == "2":
-            abm_cliente_menu()
-            
-        elif opcion == "3":
-            abm_envio_contenedor_sensor_menu()
-            
-        elif opcion == "4":
-            while True:
-                print("\n--- Gestión de Grupos de Trabajo ---")
-                print("1. Crear Grupo de Trabajo")
-                print("2. Listar Grupos de Trabajo")
-                print("3. Volver")
-                op_grupo = input_seguro("Elegí una opción: ")
-                if op_grupo == "1":
-                    nombre = input_seguro("Nombre del Grupo: ")
-                    integrantes = input_seguro("Integrantes (separados por coma): ")
-                    registrar_grupo_trabajo(nombre, integrantes)
-                elif op_grupo == "2":
-                    listar_grupos_trabajo()
-                elif op_grupo == "3":
-                    break
-                    
-        elif opcion == "5":
-            from repositories.pg_repo import consultar_cuenta_proveedor
-            consultar_cuenta_proveedor(usuario['nombre'])
-            input("\nPresioná Enter para volver al menú...")
-            
-        elif opcion == "6":
-            print("\n--- 💬 Servicio de Mensajería ---")
-            print("1. Enviar Mensaje")
-            print("2. Ver Historial de Mensajes")
-            sub_op = input_seguro("Elegí una opción: ")
-            if sub_op == "1":
-                dest = input_seguro("Destinatario (Ingresá el Email del Operador o CUIT/Nombre del Cliente): ")
-                msg = input_seguro("Mensaje: ")
-                enviar_mensaje(usuario['nombre'], dest, msg)
-            elif sub_op == "2":
-                identificador = usuario.get('identificador_login', None)
-                mensajes = obtener_mensajes(usuario['nombre'], identificador)
-                if mensajes:
-                    for m in mensajes:
-                        print(f"[{m['fecha_y_hora'].strftime('%H:%M')}] {m['remitente']} a {m['destinatario']}: {m['contenido']}")
-                else:
-                    print("No hay mensajes en tu historial.")
-            
-        elif opcion == "7":
-            while True:
-                print("\n--- [Reportes Gerenciales y de Negocio (Proveedor)] ---")
-                print("1. Envíos totales por Cliente (Fidelización)")
-                print("2. Tiempos Máximos y Mínimos de Entrega por Cliente")
-                print("3. Ranking de Clientes por Volumen Transportado (kg)")
-                print("4. Análisis Histórico de Desempeño (Eficacia global)")
-                print("5. Volver")
-                
-                op_rep = input_seguro("Elegí un reporte (1-5): ").strip()
-                if op_rep == "5":
-                    break
-                
-                if op_rep == "1":
-                    from repositories.pg_repo import reporte_envios_por_cliente
-                    datos = reporte_envios_por_cliente()
-                    print("\n📦 [ ENVÍOS TOTALES POR CLIENTE ]")
-                    if not datos: print("   ⚠️ Sin datos.")
-                    for d in datos: print(f"   - {d[0]}: {d[1]} envío(s) contratados.")
-                        
-                elif op_rep == "2":
-                    from repositories.pg_repo import reporte_tiempos_envio_por_cliente
-                    datos = reporte_tiempos_envio_por_cliente()
-                    print("\n⏱️ [ TIEMPOS MÁXIMOS Y MÍNIMOS POR CLIENTE ]")
-                    if not datos: print("   ⚠️ Sin datos.")
-                    for d in datos: print(f"   - {d[0]} | Máximo: {round(d[1] or 0, 1)} días | Mínimo: {round(d[2] or 0, 1)} días.")
-                        
-                elif op_rep == "3":
-                    from repositories.pg_repo import ranking_clientes_por_volumen
-                    datos = ranking_clientes_por_volumen()
-                    print("\n⚖️ [ RANKING POR VOLUMEN TRANSPORTADO ]")
-                    if not datos: print("   ⚠️ Sin datos.")
-                    for d in datos: print(f"   - {d[0]}: {d[1]} kg transportados en total.")
-                        
-                elif op_rep == "4":
-                    from repositories.pg_repo import analisis_historico_desempeno
-                    datos = analisis_historico_desempeno()
-                    print("\n📊 [ ANÁLISIS HISTÓRICO DE DESEMPEÑO ]")
-                    if not datos: print("   ⚠️ Sin datos históricos de entregas o demoras.")
-                    for d in datos: print(f"   - Estado Histórico '{d[0]}': {d[1]} envío(s).")
-                else:
-                    print("⚠️ Opción inválida.")
-        elif opcion == "8":
-            print("\n--- Seguimiento IoT (Vista Proveedor) ---")
-            envio_id_input = input_seguro("ID del Envío a monitorear: ")
-            if envio_id_input:
-                envio_id = int(envio_id_input)
-                from config.database import mongo_db
-                lecturas = list(mongo_db["lecturas_sensores"].find({"envio_id": envio_id}).sort("timestamp", -1).limit(3))
-                
-                if lecturas:
-                    print(f"\n📍 [ ÚLTIMAS LECTURAS IoT - Envío #{envio_id} ]")
-                    for l in lecturas:
-                        print(f"   - {l.get('timestamp').strftime('%Y-%m-%d %H:%M:%S')} | Ubicación: {l.get('ubicacion_actual')}")
-                        print(f"     Temp: {l['metricas'].get('temperatura_c')}°C | Anomalía: {'🚨 SÍ' if l.get('alerta_anomalia') else '✅ Normal'}")
-                else:
-                    print("⚠️ No hay lecturas registradas para este envío.")
-            input("\nPresioná Enter para volver...")
-
-        elif opcion == "9":
-            from repositories.pg_repo import cerrar_sesion_activa
-            cerrar_sesion_activa(usuario['id_sesion'])
-            print("🔒 Sesión de proveedor finalizada.")
-            break
-            
-        else:
-            print("⚠️ Opción inválida. Por favor, seleccioná un número del 1 al 8.")
-
-
-def menu_cliente(usuario):
-    from repositories.pg_repo import (
-        reporte_tiempos_por_envio,
-        reporte_envios_por_pais,
-        reporte_envios_por_estado,
-        reporte_envios_demorados,
-        reporte_costos_por_tipo_transporte,
-        reporte_tiempos_promedio_general
-    )
-    from repositories.mongo_repo import (
-        reporte_incidentes_abiertos,
-        reporte_analisis_predictivos,
-        reporte_promedio_incidentes_por_estado
-    )
+    catalogo_modulos = {
+        "1": "[Módulo 1] Gestión de Maestros: Clientes, Proveedores, Operadores, Usuarios y Sesiones",
+        "2": "[Módulo 2] Registro de Envíos, Contenedores, Sensores y Tramos",
+        "3": "[Módulo 3 y 8] Monitoreo IoT (Coordenadas GPS en Redis/Mongo), Recorridos y Trazabilidad",
+        "4": "[Módulo 4] Reglas IoT, Detección de Incidentes, Anomalías y Alertas Automáticas",
+        "5": "[Módulo 5] Centro de Comunicaciones con Clientes, Proveedores y Operadores",
+        "6": "[Módulo 6 y 9] Reportes Operativos, Analíticos, Grafo de Relaciones y Predicciones",
+        "7": "[Módulo 7] Finanzas ACID: Cuentas Corrientes, Facturación y Pagos (Clientes/Proveedores/Operadores)"
+    }
 
     while True:
-        datos_actuales = obtener_estado_cliente(usuario["id_cliente"])
-        estado_actual = datos_actuales["estado"]
-        
-        print("\n=======================================================")
-        print(f"   PORTAL DE CLIENTE: {usuario['nombre']} (ID: {usuario['id_cliente']})")
-        print(f"   Estado de Cuenta: [{estado_actual}] | Sesión #{usuario['id_sesion']}")
-        print("=======================================================")
-        if estado_actual == "INACTIVO":
-            print("⛔ AVISO: Tu cuenta está INACTIVA. No podés crear envíos.")
-        elif estado_actual == "SUSPENDIDO":
-            print("⚠️ AVISO: Tu cuenta está SUSPENDIDA. Solo podés abonar facturas.")
-            
-        print("1. Registrar un Nuevo Envío (y asignar Contenedores)")
-        print("2. Mis Envíos (Historial y Contenedores asignados)")
-        print("3. Seguimiento GPS de un sensor en Tiempo Real (Redis)")
-        print("4. Mi Cuenta Corriente, Facturas y Pagos")
-        print("5. Solicitar Reporte Analítico / Operativo (Facturable)")
-        print("6. Mensajería con Operadores")
-        print("7. Volver al inicio (Cerrar Sesión)")
-        
-        try:
-            opcion = input("\nSeleccioná una opción (1-7): ").strip()
-        except KeyboardInterrupt:
-            print("\n↩️ Volviendo al menú principal...")
+        print("\n==================================================================")
+        print(f"   EMPLEADO ACTIVO: {usuario['nombre']} | Sesión #{usuario['id_sesion']}")
+        print(f"   ROL: {rol_nombre}")
+        print("==================================================================")
+        print("Módulos habilitados para tu Rol:")
+        for cod in permitidos:
+            print(f"  {cod}. {catalogo_modulos[cod]}")
+        print("  8. Cerrar Sesión (Cambiar de Rol)")
+
+        op = input_seguro("\nSeleccioná el número de módulo a operar: ")
+
+        if op == "8":
+            cerrar_sesion_activa(usuario["id_sesion"])
+            print(f"🔒 Sesión #{usuario['id_sesion']} cerrada y registrada en el historial.")
             break
-        
-        if opcion == "1":
-            if estado_actual != "ACTIVO":
-                print(f"⛔ Operación bloqueada: Tu cuenta está '{estado_actual}'.")
-                continue
-            
-            print("\n--- Registrar Nuevo Envío ---")
+
+        if op not in permitidos:
+            print(f"⛔ Acceso denegado: Tu rol ({rol_nombre.split()[0]}) no tiene permisos para operar ese módulo.")
+            continue
+
+        if op == "1": modulo_1_maestros()
+        elif op == "2": modulo_2_envios_contenedores()
+        elif op == "3": modulo_3_monitoreo_iot_y_trazabilidad()
+        elif op == "4": modulo_4_incidentes_y_alertas()
+        elif op == "5": modulo_5_comunicaciones(usuario)
+        elif op == "6": modulo_6_y_9_reportes_y_predicciones(usuario)
+        elif op == "7": modulo_7_finanzas()
+
+def modulo_1_maestros():
+    while True:
+        print("\n--- [MÓDULO 1: ABM MAESTROS Y SEGURIDAD] ---")
+        print("1. ABM Clientes (Empresas que contratan fletes)")
+        print("2. ABM Proveedores (Proveedores de Contenedores, Sensores y Flota)")
+        print("3. ABM Operadores Logísticos (Personal de Puerto, Aduana, Última Milla)")
+        print("4. ABM Usuarios Internos, Roles y Auditoría de Sesiones")
+        print("5. Volver")
+        sub = input_seguro("Opción (1-5): ")
+        if sub == "1": abm_cliente_menu()
+        elif sub == "2": abm_proveedores_menu()
+        elif sub == "3": abm_operadores_logisticos_menu()
+        elif sub == "4": abm_usuarios_y_sesiones_menu()
+        elif sub == "5": break
+
+def modulo_2_envios_contenedores():
+    while True:
+        print("\n--- [MÓDULO 2: REGISTRO DE ENVÍOS, CONTENEDORES Y SENSORES] ---")
+        print("1. Registrar Nuevo Envío solicitado por un Cliente")
+        print("2. ABM de Contenedores, Sensores IoT y Cambio de Estados (Entrega y Facturación)")
+        print("3. Volver")
+        sub = input_seguro("Opción (1-3): ")
+        if sub == "1":
+            conn = get_pg_connection()
+            cursor = conn.cursor()
             try:
-                origen = (input_seguro("Origen [Ej: Buenos Aires]: ") or "Buenos Aires").title()
-                destino = (input_seguro("Destino [Ej: Rosario]: ") or "Rosario").title()
+                listar_clientes_formateados()
+                id_cli = int(input_seguro("\nIngresá únicamente el ID del Cliente que solicita el envío: "))
+
+                print("\nPuntos Logísticos (Hubs) de la red:")
+                print("  Argentina: BUE (Puerto BsAs) | EZE (Ezeiza) | ROS (Rosario) | COR (Córdoba) | MDZ (Aduana Mendoza)")
+                print("  Exterior : SCL (Puerto San Antonio, Chile) | MAD (Aeropuerto Barajas, España)")
+                origen = input_seguro("Código Hub de Origen [Ej: BUE]: ").upper() or "BUE"
+                destino = input_seguro("Código Hub de Destino [Ej: SCL]: ").upper() or "SCL"
                 prioridad = input_seguro("Prioridad [ALTA / MEDIA / BAJA]: ").upper() or "MEDIA"
-                
+
+                pais_o = HUBS_PAIS.get(origen, "Argentina")
+                pais_d = HUBS_PAIS.get(destino, "Exterior")
+                es_internacional = (pais_o != pais_d) or destino in ["SCL", "MAD"]
+
+                id_operador = None
+                if es_internacional:
+                    print(f"\n🌐 Trayecto INTERNACIONAL detectado ({origen} [{pais_o}] -> {destino} [{pais_d}]).")
+                    print("Se requiere asignar un Operador Logístico para trámites aduaneros y portuarios:")
+                    cursor.execute("SELECT id_operador, nombre_completo, especialidad FROM operador_logistico WHERE estado = 'ACTIVO';")
+                    ops = cursor.fetchall()
+                    for o in ops:
+                        print(f"   - ID #{o[0]}: {o[1]} | Especialidad: {o[2]}")
+                    id_operador = int(input_seguro("Seleccioná el ID del Operador Logístico: ") or (ops[0][0] if ops else 1))
+                else:
+                    print(f"\n🚛 Trayecto NACIONAL TERRESTRE detectado ({origen} -> {destino}). No requiere Operador Aduanero/Portuario.")
+
+                # Listado de proveedores para asociar a los contenedores y sensores
+                cursor.execute("SELECT id_proveedor, razon_social, tipo_insumo FROM proveedor WHERE estado = 'ACTIVO' ORDER BY id_proveedor;")
+                provs = cursor.fetchall()
+                print("\nProveedores de Insumos registrados:")
+                for p in provs:
+                    print(f"   - ID #{p[0]}: {p[1]} (Rubro: {p[2]})")
+
                 contenedores = []
                 while True:
-                    print(f"\n--- Agregando Contenedor {len(contenedores) + 1} ---")
-                    codigo = input_seguro("Código Internacional [Ej: AR-1234]: ") or f"CONT-{len(contenedores)+1}X"
-                    tipo_c = input_seguro("Tipo [REFRIGERADO / ESTANDAR]: ").upper() or "ESTANDAR"
-                    cap = input_seguro("Capacidad kg [Enter para 25000]: ")
-                    capacidad = float(cap) if cap else 25000.0
-                    
+                    print(f"\n--- Configurando Contenedor #{len(contenedores) + 1} ---")
+                    cod = input_seguro("Código Internacional Contenedor [Ej: MSKU-9012]: ") or f"MSKU-{1000 + len(contenedores)}"
+                    tipo_c = input_seguro("Tipo de Contenedor [REFRIGERADO / ESTANDAR]: ").upper() or "REFRIGERADO"
+                    cap = float(input_seguro("Capacidad máxima en kg [Enter para 25000]: ") or 25000)
+                    id_prov_cont = int(input_seguro("ID del Proveedor del Contenedor: ") or (provs[0][0] if provs else 1))
+
+                    print("Tipos de Sensor IoT a instalar en este contenedor:")
+                    print("   1. TEMPERATURA_GPS")
+                    print("   2. HUMEDAD_GPS")
+                    print("   3. MULTIPARAMETRICO_GPS (Temperatura + Humedad + Vibración)")
+                    op_s = input_seguro("Elegí el tipo de sensor (1-3): ")
+                    tipo_sensor = {"1": "TEMPERATURA_GPS", "2": "HUMEDAD_GPS", "3": "MULTIPARAMETRICO_GPS"}.get(op_s, "TEMPERATURA_GPS")
+                    id_prov_sens = int(input_seguro("ID del Proveedor del Sensor IoT: ") or (provs[-1][0] if provs else 1))
+
                     contenedores.append({
-                        "codigo": codigo,
+                        "codigo": cod,
                         "tipo": tipo_c,
-                        "capacidad": capacidad
+                        "capacidad": cap,
+                        "id_proveedor_contenedor": id_prov_cont,
+                        "tipo_sensor": tipo_sensor,
+                        "id_proveedor_sensor": id_prov_sens
                     })
-                    
-                    otro = input_seguro("\n¿Querés agregar otro contenedor a este mismo envío? (s/n): ").lower()
-                    if otro != 's':
+                    if input_seguro("¿Agregar otro contenedor a este envío? (s/n): ").lower() != "s":
                         break
-                
-                id_envio = registrar_envio_con_contenedores_cliente(
-                    usuario['id_cliente'], origen, destino, prioridad, contenedores
-                )
-                print(f"\n✅ ¡Éxito! Envío #{id_envio} creado junto con {len(contenedores)} contenedor/es.")
-                
-            except KeyboardInterrupt:
-                continue
+
+                registrar_envio_con_contenedores_cliente(id_cli, origen, destino, prioridad, contenedores, id_operador)
             except Exception as e:
-                print(f"❌ Error al registrar: {e}")
-                
-        elif opcion == "2":
-            print("\n--- Mi Historial de Envíos ---")
-            listar_envios_cliente(usuario['id_cliente'])
-            
-        elif opcion == "3":
-            print("\n--- Seguimiento IoT de Contenedores por Envío ---")
-            try:
-                envio_id_input = input_seguro("ID del Envío a consultar: ")
-                if not envio_id_input:
-                    continue
-                envio_id = int(envio_id_input)
-                
-                from repositories.mongo_repo import generar_lectura_automatica, guardar_lectura_iot
-                from config.database import mongo_db
-                from config.database import get_pg_connection
-                from repositories.neo4j_repo import buscar_camino_optimo
-
-                # 1. Generación de Telemetría
-                lectura_sim = generar_lectura_automatica(envio_id, contenedor_id=1)
-                guardar_lectura_iot(
-                    contenedor_id=lectura_sim["contenedor_id"],
-                    envio_id=lectura_sim["envio_id"],
-                    ubicacion_actual=lectura_sim["ubicacion_actual"],
-                    metricas=lectura_sim["metricas"],
-                    alerta_anomalia=lectura_sim["alerta_anomalia"]
-                )
-                
-                # 2. Reconstrucción Dinámica e Integración con Neo4j
-                conn = get_pg_connection()
-                cursor = conn.cursor()
-                try:
-                    cursor.execute("SELECT origen_envio, destino_envio FROM envio WHERE id_envio = %s;", (envio_id,))
-                    info = cursor.fetchone()
-                    if info:
-                        origen = info[0].split(',')[0].strip()
-                        destino = info[1].split(',')[0].strip()
-                        
-                        print(f"\n🗺️ [ RECONSTRUCCIÓN DEL RECORRIDO - Envío #{envio_id} ]")
-                        
-                        # A) Consultamos Neo4j para el camino planificado
-                        ruta_neo4j = buscar_camino_optimo(origen, destino)
-                        if ruta_neo4j and len(ruta_neo4j) > 0:
-                            print(f"   - Camino Óptimo (Neo4j): {' -> '.join(ruta_neo4j[0]['ruta'])}")
-                        
-                        # B) Construimos el recorrido real histórico desde MongoDB
-                        historial = list(mongo_db["lecturas_sensores"].find({"envio_id": envio_id}).sort("timestamp", 1))
-                        recorrido_real = []
-                        for loc in historial:
-                            ub = loc.get('ubicacion_actual')
-                            if not recorrido_real or recorrido_real[-1] != ub:
-                                recorrido_real.append(ub)
-                                
-                        print(f"   - Recorrido Real: {' -> '.join(recorrido_real)}")
-                finally:
-                    cursor.close()
-                    conn.close()
-
-                # 3. Mostrar el historial recuperando la Batería
-                lecturas = list(mongo_db["lecturas_sensores"].find({"envio_id": envio_id}).sort("timestamp", -1).limit(5))
-                if lecturas:
-                    print(f"\n📍 [ HISTORIAL RECIENTE DE TELEMETRÍA IoT ]")
-                    for l in lecturas:
-                        print(f"   - Fecha/Hora: {l.get('timestamp').strftime('%Y-%m-%d %H:%M:%S')} | Ubicación: {l.get('ubicacion_actual')}")
-                        print(f"   - Temp: {l['metricas'].get('temperatura_c')} °C | Humedad: {l['metricas'].get('humedad_pct')}% | Batería: {l['metricas'].get('bateria_pct')}%")
-                        print(f"   - Anomalía: {'🚨 SÍ' if l.get('alerta_anomalia') else '✅ Normal'}")
-                        print("-" * 50)
-                else:
-                    print("⚠️ No se encontraron lecturas.")
-                    
-            except KeyboardInterrupt:
-                continue
-            except Exception as e:
-                print(f"❌ Error al consultar telemetría: {e}")
-                
-        elif opcion == "4":
-            consultar_cuenta_corriente(usuario['id_cliente'])
-                
-        elif opcion == "5":
-            if estado_actual != "ACTIVO":
-                print("⛔ Operación bloqueada.")
-                continue
-            try:
-                print("\n--- 📊 SOLICITUD DE REPORTES (COSTO: $2500) ---")
-                print("1. Análisis Predictivos (Atrasos y Riesgos) [MongoDB]")
-                print("2. Tiempo Promedio Global de Entrega [PostgreSQL]")
-                print("3. Envíos por Estado (Entregados, Demorados, En Tránsito) [PostgreSQL]")
-                print("4. Envíos Demorados [PostgreSQL]")
-                print("5. Incidentes Abiertos [MongoDB]")
-                print("6. Costos por Tipo de Transporte [PostgreSQL]")
-                print("7. Envíos por País de Origen [PostgreSQL]")
-                
-                sel_rep = input_seguro("Seleccioná un reporte (1-7) [Enter por defecto 1]: ").strip() or "1"
-                
-                print("\nFormatos de exportación disponibles:")
-                print("1. PDF")
-                print("2. WORD")
-                print("3. TXT")
-                sel_form = input_seguro("Seleccioná el formato (1-3) [Enter por defecto PDF]: ").strip()
-                mapeo_formatos = {"1": "PDF", "2": "WORD", "3": "TXT"}
-                formato = mapeo_formatos.get(sel_form, "PDF")
-
-                contenido_guardar = []
-                tipo_rep_str = ""
-
-                print(f"\n=============================================")
-                print(f"   GENERANDO REPORTE EN FORMATO {formato}...")
-                print(f"=============================================\n")
-
-                if sel_rep == "1":
-                    tipo_rep_str = "PREDICCION_RIESGOS"
-                    datos = reporte_analisis_predictivos()
-                    print("📈 [ REPORTE DE ANÁLISIS PREDICTIVOS Y RIESGOS ]")
-                    if not datos:
-                        print("   ✅ No hay predicciones de riesgo crítico registradas.")
-                    for d in datos:
-                        txt = f"   - Envío #{d['id_envio']} | Probabilidad de demora: {d['probabilidad_demora']}% | Riesgos: {d['riesgo_climatico']} / {d['riesgo_operativo']}"
-                        print(txt)
-                        contenido_guardar.append(txt)
-
-                elif sel_rep == "2":
-                    tipo_rep_str = "TIEMPOS_PROMEDIO_GLOBAL"
-                    promedio = reporte_tiempos_promedio_general()
-                    print("⏱️ [ TIEMPO PROMEDIO DE ENTREGA GLOBAL ]")
-                    txt = f"   - El tiempo estimado promedio de entrega global en la red logística es de {promedio} días."
-                    print(txt)
-                    contenido_guardar.append(txt)
-
-                elif sel_rep == "3":
-                    tipo_rep_str = "ENVIOS_POR_ESTADO"
-                    datos = reporte_envios_por_estado()
-                    print("📊 [ VOLUMEN DE ENVÍOS POR ESTADO ]")
-                    if not datos:
-                        print("   ⚠️ No hay datos de estados registrados.")
-                    for d in datos:
-                        txt = f"   - Estado: {d[0]} | Total de envíos: {d[1]}"
-                        print(txt)
-                        contenido_guardar.append(txt)
-
-                elif sel_rep == "4":
-                    tipo_rep_str = "ENVIOS_DEMORADOS"
-                    datos = reporte_envios_demorados()
-                    print("🐌 [ REPORTE DE ENVÍOS DEMORADOS ]")
-                    if not datos:
-                        print("   ✅ Excelente: No hay envíos demorados.")
-                    for d in datos:
-                        txt = f"   - Envío #{d[0]} (Cliente {d[1]}) | Ruta: {d[2]} -> {d[3]}"
-                        print(txt)
-                        contenido_guardar.append(txt)
-
-                elif sel_rep == "5":
-                    tipo_rep_str = "INCIDENTES_ABIERTOS"
-                    datos = reporte_incidentes_abiertos()
-                    print("🚨 [ INCIDENTES ABIERTOS ]")
-                    if not datos:
-                        print("   ✅ No hay incidentes pendientes de resolución.")
-                    for d in datos:
-                        txt = f"   - Envío #{d['id_envio']} | {d['tipo']} (Severidad: {d['severidad']}) - Reportado: {d['fecha'].strftime('%Y-%m-%d')}"
-                        print(txt)
-                        contenido_guardar.append(txt)
-
-                elif sel_rep == "6":
-                    tipo_rep_str = "COSTOS_TRANSPORTE"
-                    datos = reporte_costos_por_tipo_transporte()
-                    print("💰 [ ANÁLISIS DE COSTOS Y USO POR TIPO DE TRANSPORTE ]")
-                    if not datos:
-                        print("   ⚠️ No hay tramos registrados.")
-                    for d in datos:
-                        txt = f"   - Transporte {d[0]}: Usado en {d[1]} tramos."
-                        print(txt)
-                        contenido_guardar.append(txt)
-
-                elif sel_rep == "7":
-                    tipo_rep_str = "ENVIOS_POR_ORIGEN"
-                    datos = reporte_envios_por_pais()
-                    print("🌎 [ VOLUMEN DE ENVÍOS POR PAÍS DE ORIGEN ]")
-                    if not datos:
-                        print("   ⚠️ No hay datos de orígenes por país.")
-                    for d in datos:
-                        txt = f"   - País de Origen: {d[0]} | Total de envíos salientes: {d[1]}"
-                        print(txt)
-                        contenido_guardar.append(txt)
-                else:
-                    print("❌ Opción inválida.")
-                    continue
-
-                print(f"=============================================\n")
-
-                contenido_json = {"datos_extraidos": contenido_guardar}
-                guardar_reporte(usuario['nombre'], tipo_rep_str, contenido_json, formato)
-                
-                fact_id = crear_factura_y_actualizar_saldo(usuario['id_cliente'], 2500.00)
-                print(f"✅ Reporte '{tipo_rep_str}' almacenado con éxito.")
-                print(f"📄 Se emitió la Factura #{fact_id} por el cargo de $2500.00.")
-
-            except KeyboardInterrupt:
-                continue
-            except Exception as e:
-                print(f"❌ Error al generar reporte: {e}")
-                
-        elif opcion == "6":
-            print("\n--- 💬 Servicio de Mensajería ---")
-            print("1. Enviar Mensaje")
-            print("2. Ver Historial de Mensajes")
-            sub_op = input_seguro("Elegí una opción: ")
-            if sub_op == "1":
-                dest = input_seguro("Destinatario (Ingresá el Email del Operador o Proveedor): ")
-                msg = input_seguro("Mensaje: ")
-                enviar_mensaje(usuario['nombre'], dest, msg)
-            elif sub_op == "2":
-                identificador = usuario.get('identificador_login', None)
-                mensajes = obtener_mensajes(usuario['nombre'], identificador)
-                if mensajes:
-                    for m in mensajes:
-                        print(f"[{m['fecha_y_hora'].strftime('%H:%M')}] {m['remitente']} a {m['destinatario']}: {m['contenido']}")
-                else:
-                    print("No hay mensajes en tu historial.")
-                    
-        elif opcion == "7":
-            cerrar_sesion_activa(usuario['id_sesion'])
-            print("🔒 Sesión finalizada.")
+                print(f"❌ Error al registrar envío: {e}")
+            finally:
+                cursor.close()
+                conn.close()
+        elif sub == "2":
+            abm_envio_contenedor_sensor_menu()
+        elif sub == "3":
             break
-        else:
-            print("⚠️ Opción inválida.")
 
-
-def menu_operario(usuario):
+def modulo_3_monitoreo_iot_y_trazabilidad():
     while True:
-        print("\n=======================================================")
-        print(f"   PANEL DE OPERARIO: {usuario['nombre']} | Sesión #{usuario['id_sesion']}")
-        print("=======================================================")
-        print("1. [Consulta] Ver Clientes, Envíos y Grupos de Trabajo")
-        print("2. [IoT y Trayectos] Monitoreo de Sensores, Alertas y Rutas")
-        print("3. [Finanzas ACID] Cuentas Corrientes, Facturación y Pagos")
-        print("4. [Analítica y Reportes] Rankings y Predicción de Riesgos")
-        print("5. [Comunicaciones] Servicio de Mensajería Global")
-        print("6. Volver al inicio (Cerrar Sesión)")
-        
-        opcion = input("\nSeleccioná un módulo (1-6): ").strip()
-        
-        if opcion == "1":
-            submenu_abm_operario()
-        elif opcion == "2":
-            submenu_iot_y_trayectos()
-        elif opcion == "3":
-            submenu_finanzas_operario()
-        elif opcion == "4":
-            submenu_analitica_operario()
-        elif opcion == "5":
-            from repositories.mongo_repo import enviar_mensaje, obtener_mensajes
-            from repositories.pg_repo import input_seguro
-            print("\n--- 💬 Servicio de Mensajería ---")
-            print("1. Enviar Mensaje")
-            print("2. Ver Historial de Mensajes")
-            sub_op = input_seguro("Elegí una opción: ")
-            if sub_op == "1":
-                dest = input_seguro("Destinatario (Ingresá el Email del Proveedor o CUIT/Nombre del Cliente): ")
-                msg = input_seguro("Mensaje: ")
-                enviar_mensaje(usuario['nombre'], dest, msg)
-            elif sub_op == "2":
-                identificador = usuario.get('identificador_login', None)
-                mensajes = obtener_mensajes(usuario['nombre'], identificador)
-                if mensajes:
-                    for m in mensajes:
-                        print(f"[{m['fecha_y_hora'].strftime('%H:%M')}] {m['remitente']} a {m['destinatario']}: {m['contenido']}")
-                else:
-                    print("No hay mensajes en tu historial.")
-        elif opcion == "6":
-            cerrar_sesion_activa(usuario['id_sesion'])
-            print("🔒 Sesión de operario finalizada.")
-            break
-        else:
-            print("⚠️ Opción inválida.")
-
-
-def submenu_abm_operario():
-    while True:
-        print("\n--- [1. Consulta Operativa] ---")
-        print("a. Listar Clientes del Sistema")
-        print("b. Listar Envíos, Contenedores y Sensores (Solo Lectura)")
-        print("c. Listar Grupos de Trabajo (Ver asignaciones)")
-        print("d. Volver")
-        sub = input("Elegí una opción: ").lower().strip()
-        
-        if sub == "a":
-            from repositories.pg_repo import listar_clientes_formateados
-            print("\n--- LISTADO DE CLIENTES ---")
-            listar_clientes_formateados()
-            
-        elif sub == "b":
-            from repositories.pg_repo import listar_envios_y_sensores_operario
-            listar_envios_y_sensores_operario()
-            
-        elif sub == "c":
-            print("\n--- Grupos de Trabajo ---")
-            listar_grupos_trabajo()
-            
-        elif sub == "d":
-            break
-        else:
-            print("⚠️ Opción inválida. Elegí a, b, c o d.")
-
-
-def submenu_iot_y_trayectos():
-    while True:
-        print("\n--- [2. Monitoreo IoT, Alertas y Trayectos] ---")
-        print("1. Consultar Posición Actual GPS de un Envío (MongoDB)")
-        print("2. Registrar Evento Logístico (Bitácora en MongoDB)")
-        print("3. Consultar Historial de Eventos de un Envío (MongoDB)")
-        print("4. Registrar Incidente o Problema (MongoDB)")
-        print("5. Consultar Incidentes de un Envío (MongoDB)")
+        print("\n--- [MÓDULO 3 Y 8: MONITOREO IoT (GPS REAL), RECORRIDOS Y EVENTOS] ---")
+        print("1. Emitir Lectura IoT Continua (Simular Sensor con Lat/Lon real -> Redis + MongoDB)")
+        print("2. Consultar Última Posición GPS en Tiempo Real (Caché Redis)")
+        print("3. Reconstrucción del Recorrido de un Contenedor (Coordenadas Históricas MongoDB)")
+        print("4. Registrar Evento Logístico en Bitácora")
+        print("5. Ver Historial Completo de Eventos de un Envío")
         print("6. Volver")
-        
-        try:
-            op = input_seguro("Elegí una opción (1-6): ").strip()
-        except KeyboardInterrupt:
-            print("\n↩️ Volviendo...")
+        sub = input_seguro("Opción (1-6): ")
+        if sub == "1":
+            id_env = int(input_seguro("ID del Envío: "))
+            id_cont = int(input_seguro("ID del Contenedor: ") or 1)
+            id_sens = int(input_seguro("ID del Sensor: ") or 1)
+            doc = generar_lectura_iot_coordenadas(id_env, id_cont, id_sens)
+            gps = doc["coordenadas_gps"]
+            print(f"✅ Lectura registrada -> Punto: {doc['ubicacion_actual']} | GPS: ({gps['lat']}, {gps['lon']}) | Temp: {doc['metricas']['temperatura_c']}°C | Bat: {doc['metricas']['bateria_pct']}%")
+        elif sub == "2":
+            id_env = int(input_seguro("ID del Envío a consultar en Redis: "))
+            datos_redis = obtener_ultima_posicion_envio(id_env)
+            if datos_redis:
+                print(f"\n⚡ [ CACHÉ TIEMPO REAL REDIS - Envío #{id_env} ]")
+                print(f"   - Punto Logístico: {datos_redis.get('punto_logistico')}")
+                print(f"   - Coordenadas GPS: Latitud {datos_redis.get('latitud')}, Longitud {datos_redis.get('longitud')}")
+                print(f"   - Temperatura: {datos_redis.get('temperatura_c')}°C | Humedad: {datos_redis.get('humedad_pct')}% | Batería: {datos_redis.get('bateria_pct')}%")
+                print(f"   - Timestamp: {datos_redis.get('ultima_actualizacion')}")
+            else:
+                print("⚠️ Sin datos en caché de Redis para ese envío.")
+        elif sub == "3":
+            id_env = int(input_seguro("ID del Envío para reconstruir recorrido: "))
+            lecturas = list(mongo_db["lecturas_sensores"].find({"envio_id": id_env}).sort("timestamp", 1))
+            print(f"\n🗺️ [ RECONSTRUCCIÓN GEOGRÁFICA DEL RECORRIDO - Envío #{id_env} ]")
+            if not lecturas:
+                print("   ⚠️ No hay lecturas registradas para este envío.")
+            for idx, l in enumerate(lecturas, 1):
+                gps = l.get("coordenadas_gps", {"lat": 0.0, "lon": 0.0})
+                print(f"   Paso {idx}: {l.get('ubicacion_actual')} -> GPS ({gps.get('lat')}, {gps.get('lon')}) | Temp: {l['metricas'].get('temperatura_c')}°C | {l.get('timestamp').strftime('%Y-%m-%d %H:%M:%S')}")
+        elif sub == "4":
+            id_env = int(input_seguro("ID del Envío: "))
+            print("Tipos de Eventos Oficiales:")
+            print("  1. Carga iniciada | 2. En tránsito | 3. Aduana | 4. Retraso | 5. Descarga | 6. Entregado")
+            t_op = input_seguro("Seleccioná el tipo de evento (1-6): ")
+            tipo = {
+                "1": "Carga iniciada", "2": "En tránsito", "3": "Aduana",
+                "4": "Retraso", "5": "Descarga", "6": "Entregado"
+            }.get(t_op, "En tránsito")
+            ubic = input_seguro("Ubicación / Punto Logístico: ")
+            desc = input_seguro("Descripción operativa: ")
+            registrar_evento_logistico(id_env, tipo, ubic, desc)
+        elif sub == "5":
+            id_env = int(input_seguro("ID del Envío: "))
+            eventos = obtener_historial_eventos(id_env)
+            if not eventos:
+                print("   ⚠️ No hay eventos registrados para este envío.")
+            else:
+                print(f"\n📋 [ HISTORIAL DE EVENTOS LOGÍSTICOS - Envío #{id_env} ]")
+                for e in eventos:
+                    fecha_str = e["fecha_y_hora"].strftime("%Y-%m-%d %H:%M")
+                    print(f"   - [{fecha_str}] envio id{e['id_envio']} tuvo un evento: {e['tipo_evento']}")
+                    print(f"     en la ubicacion: {e['ubicacion']}")
+                    print(f"     descripcion: {e['descripcion']}\n")
+        elif sub == "6":
             break
-            
-        if op == "6":
-            break
-            
-        try:
-            if op == "1":
-                print("\n--- Consulta de Posición GPS y Recorrido ---")
-                envio_id_input = input_seguro("Ingresá el ID del Envío a consultar: ")
-                if not envio_id_input:
-                    continue
-                envio_id = int(envio_id_input)
-                
-                from config.database import mongo_db
-                from config.database import get_pg_connection
-                from repositories.neo4j_repo import buscar_camino_optimo
 
-                ultima_lectura = mongo_db["lecturas_sensores"].find_one({"envio_id": envio_id}, sort=[("timestamp", -1)])
-
-                if ultima_lectura:
-                    conn = get_pg_connection()
-                    cursor = conn.cursor()
-                    try:
-                        cursor.execute("SELECT origen_envio, destino_envio FROM envio WHERE id_envio = %s;", (envio_id,))
-                        info = cursor.fetchone()
-                        if info:
-                            origen = info[0].split(',')[0].strip()
-                            destino = info[1].split(',')[0].strip()
-                            
-                            print(f"\n🗺️ [ RECONSTRUCCIÓN DEL RECORRIDO - Envío #{envio_id} ]")
-                            
-                            # A) Consultamos Neo4j para el camino planificado
-                            ruta_neo4j = buscar_camino_optimo(origen, destino)
-                            if ruta_neo4j and len(ruta_neo4j) > 0:
-                                print(f"   - Camino Óptimo (Neo4j): {' -> '.join(ruta_neo4j[0]['ruta'])}")
-                            
-                            # B) Construimos el recorrido real histórico
-                            historial = list(mongo_db["lecturas_sensores"].find({"envio_id": envio_id}).sort("timestamp", 1))
-                            recorrido_real = []
-                            for loc in historial:
-                                ub = loc.get('ubicacion_actual')
-                                if not recorrido_real or recorrido_real[-1] != ub:
-                                    recorrido_real.append(ub)
-                                    
-                            print(f"   - Recorrido Real: {' -> '.join(recorrido_real)}")
-                    finally:
-                        cursor.close()
-                        conn.close()
-
-                    print(f"\n📍 [POSICIÓN GPS ACTUAL]")
-                    print(f"   - Ubicación: {ultima_lectura.get('ubicacion_actual')}")
-                    print(f"   - Temp: {ultima_lectura['metricas'].get('temperatura_c')} °C | Batería: {ultima_lectura['metricas'].get('bateria_pct')}%")
-                    print(f"   - Sincronizado: {ultima_lectura.get('timestamp')}")
-                else:
-                    print(f"⚠️ No hay registros de posición GPS recientes para el Envío #{envio_id}.")
-                
-            elif op == "2":
-                print("\n--- Nuevo Evento Logístico ---")
-                id_envio = int(input_seguro("ID del Envío: "))
-                tipo_evento = input_seguro("Tipo (Ej. Aduana, Descarga, Carga): ")
-                ubicacion = input_seguro("Ubicación actual: ")
-                descripcion = input_seguro("Descripción breve: ")
-                registrar_evento_logistico(id_envio, tipo_evento, ubicacion, descripcion)
-                
-            elif op == "3":
-                id_envio = int(input_seguro("ID del Envío a consultar: "))
-                eventos = obtener_historial_eventos(id_envio)
-                if eventos:
-                    print(f"\n📋 Historial de Eventos del Envío #{id_envio}:")
-                    for e in eventos:
-                        print(f"   - {e['fecha_y_hora'].strftime('%d/%m %H:%M')} | {e['tipo_evento']} en {e['ubicacion']} -> {e['descripcion']}")
-                else:
-                    print("⚠️ No hay eventos registrados para este envío.")
-                    
-            elif op == "4":
-                print("\n--- Nuevo Incidente ---")
-                id_envio = int(input_seguro("ID del Envío: "))
-                tipo_incidente = input_seguro("Tipo (Ej. Mecánico, Climático): ")
-                print("Niveles de severidad: ALTA, MEDIA, BAJA")
-                severidad = input_seguro("Severidad: ").upper()
-                descripcion = input_seguro("Descripción del problema: ")
-                registrar_incidente(id_envio, tipo_incidente, severidad, descripcion)
-                
-            elif op == "5":
-                id_envio = int(input_seguro("ID del Envío a consultar: "))
-                incidentes = obtener_incidentes_por_envio(id_envio)
-                if incidentes:
-                    print(f"\n🚨 Historial de Incidentes del Envío #{id_envio}:")
-                    for i in incidentes:
-                        print(f"   - [{i['severidad']}] {i['fecha'].strftime('%d/%m %H:%M')} | {i['tipo']} (Estado: {i['estado']}) -> {i['descripcion']}")
-                else:
-                    print("✅ No hay incidentes reportados para este envío.")
-                    
-        except ValueError:
-            print("❌ Error: Ingrese un ID numérico válido.")
-        except Exception as e:
-            print(f"❌ Error inesperado: {e}")
-
-
-def submenu_finanzas_operario():
+def modulo_4_incidentes_y_alertas():
     while True:
-        print("\n--- [3. Finanzas, Auditoría y Cuentas Corrientes] ---")
-        print("1. Auditar Cuenta Corriente de un Cliente (Solo Lectura)")
-        print("2. Ver Reporte Global de Clientes Deudores")
-        print("3. Emitir Factura / Cargo Manual (Transacción ACID)")
-        print("4. Ejecutar Cierre Mensual de Cuentas Corrientes")
-        print("5. Volver")
-        
-        try:
-            op = input_seguro("Elegí una opción (1-5): ").strip()
-        except KeyboardInterrupt:
-            print("\n↩️ Volviendo...")
+        print("\n--- [MÓDULO 4: REGLAS IoT, INCIDENTES Y ALERTAS AUTOMÁTICAS] ---")
+        print("1. ABM de Reglas de Umbrales IoT y Gestión de Alertas de Sensores")
+        print("2. Registrar Incidente en Ruta Manualmente")
+        print("3. Consultar Incidentes por Envío")
+        print("4. Detección de Anomalías de Temperatura")
+        print("5. Ranking de Rutas/Envíos con Mayor Cantidad de Incidentes")
+        print("6. Volver")
+        sub = input_seguro("Opción (1-6): ")
+        if sub == "1": abm_reglas_y_alertas_menu()
+        elif sub == "2":
+            id_env = int(input_seguro("ID del Envío: "))
+            tipo = input_seguro("Tipo (Climático / Aduanero / Falla Mecánica / Corte Cadena Frío): ")
+            sev = input_seguro("Severidad [ALTA / MEDIA / BAJA]: ").upper() or "ALTA"
+            desc = input_seguro("Descripción: ")
+            registrar_incidente(id_env, tipo, sev, desc)
+        elif sub == "3":
+            id_env = int(input_seguro("ID del Envío: "))
+            incidentes = obtener_incidentes_por_envio(id_env)
+            if not incidentes:
+                print("   ✅ Sin incidentes para este envío.")
+            for i in incidentes:
+                print(f"   - [{i['severidad']}] {i['tipo']} ({i['estado']}): {i['descripcion']}")
+        elif sub == "4":
+            anomalias = deteccion_anomalias_temperatura()
+            if not anomalias:
+                print("   ✅ No se registran anomalías térmicas.")
+            for d in anomalias:
+                gps = d.get("coordenadas_gps", {})
+                print(f"   - Envío #{d['envio_id']} (Sensor #{d.get('sensor_id', 1)}) | Temp: {d['metricas']['temperatura_c']}°C | Hub: {d['ubicacion_actual']} ({gps.get('lat')}, {gps.get('lon')})")
+        elif sub == "5":
+            for r in ranking_rutas_incidentes():
+                print(f"   - Envío/Ruta #{r['_id']}: {r['total_incidentes']} incidente(s) registrados.")
+        elif sub == "6":
             break
-            
-        if op == "5":
-            break
-            
-        try:
-            if op == "1":
-                cid_input = input_seguro("Ingresá el ID del Cliente a auditar: ")
-                if not cid_input:
-                    continue
-                from repositories.pg_repo import consultar_cuenta_corriente_operario
-                consultar_cuenta_corriente_operario(int(cid_input))
-                
-            elif op == "2":
-                from repositories.pg_repo import listar_clientes_deudores
-                listar_clientes_deudores()
-                
-            elif op == "3":
-                print("\n--- Emisión de Cargo Manual ---")
-                cid_input = input_seguro("ID del Cliente [Enter para 1]: ")
-                cid = int(cid_input) if cid_input else 1
-                importe_input = input_seguro("Importe de la Factura / Cargo (ej: 15000.00): ")
-                
-                if not importe_input:
-                    continue
-                importe = float(importe_input)
-                
-                from repositories.pg_repo import crear_factura_y_actualizar_saldo
-                id_factura = crear_factura_y_actualizar_saldo(cid, importe)
-                print(f"✅ Factura Administrativa #{id_factura} emitida con éxito para el Cliente #{cid}.")
-                
-            elif op == "4":
-                from repositories.pg_repo import ejecutar_cierre_mensual_cuentas
-                ejecutar_cierre_mensual_cuentas()
-                input("\nPresioná Enter para continuar...")
-                
-        except ValueError:
-            print("❌ Error: Ingrese un valor numérico válido.")
-        except KeyboardInterrupt:
-            print("\n↩️ Operación cancelada.")
-            continue
-        except Exception as e:
-            print(f"❌ Error financiero: {e}")
 
-
-def submenu_analitica_operario():
+def modulo_5_comunicaciones(usuario):
     while True:
-        print("\n--- [4. Analítica de Riesgos y Operaciones (Operador)] ---")
-        print("1. Predicción de Atrasos y Riesgos (MongoDB)")
-        print("2. Detección de Anomalías de Temperatura IoT (MongoDB)")
-        print("3. Ranking de Envíos/Rutas con más Incidentes (MongoDB)")
-        print("4. Red de Relaciones Cliente-Envío-Operador (Neo4j - Grafo)")
-        print("5. Volver")
-        
-        op = input_seguro("Elegí un reporte operativo (1-5): ").strip()
-        
-        if op == "5":
+        print("\n--- [MÓDULO 5: COMUNICACIÓN CON CLIENTES, PROVEEDORES Y OPERADORES] ---")
+        print("1. Registrar / Enviar Comunicación Externa o Interna")
+        print("2. Ver Historial de Comunicaciones")
+        print("3. Volver al panel principal")
+        sub = input_seguro("Opción (1-3): ")
+        if sub == "1":
+            dest = input_seguro("Destinatario (Razón Social Cliente, Proveedor u Operador Logístico): ")
+            msg = input_seguro("Mensaje / Instrucción operativa: ")
+            enviar_mensaje(usuario["nombre"], dest, msg)
+        elif sub == "2":
+            mensajes = obtener_mensajes(usuario["nombre"])
+            if not mensajes:
+                print("   ⚠️ No hay comunicaciones registradas para este usuario.")
+            for m in mensajes:
+                print(f"   [{m['fecha_y_hora'].strftime('%Y-%m-%d %H:%M')}] {m['remitente']} -> {m['destinatario']}: {m['contenido']}")
+        elif sub == "3":
             break
-            
-        if op == "1":
-            from repositories.mongo_repo import reporte_analisis_predictivos
-            datos = reporte_analisis_predictivos()
-            print("\n📈 [ PREDICCIÓN DE ATRASOS Y RIESGOS ]")
-            if not datos: print("   ✅ No hay predicciones de riesgo crítico.")
-            for d in datos: print(f"   - Envío #{d['id_envio']} | Prob. Demora: {d['probabilidad_demora']}% | Riesgos: {d['riesgo_climatico']}")
-                
-        elif op == "2":
-            from repositories.mongo_repo import deteccion_anomalias_temperatura
-            datos = deteccion_anomalias_temperatura()
-            print("\n❄️ [ DETECCIÓN DE ANOMALÍAS DE TEMPERATURA ]")
-            if not datos: print("   ✅ No se detectaron anomalías en los sensores.")
-            for d in datos: print(f"   - Envío #{d['envio_id']} | Temp: {d['metricas']['temperatura_c']}°C | Ubicación: {d['ubicacion_actual']}")
-                
-        elif op == "3":
-            from repositories.mongo_repo import ranking_rutas_incidentes
-            datos = ranking_rutas_incidentes()
-            print("\n🚧 [ RANKING DE ENVÍOS CON MÁS INCIDENTES ]")
-            if not datos: print("   ✅ No hay incidentes registrados.")
-            for d in datos: print(f"   - Envío #{d['_id']} tiene un total de {d['total_incidentes']} incidente(s).")
-                
-        elif op == "4":
-            print("\n🕸️ [ RED DE RELACIONES Y TRAZABILIDAD - GRAFO NEO4J ]")
-            print("Analizando dependencias logísticas (Cliente -> Envío -> Vehículo -> Operador)...")
-            
-            relaciones_simuladas = [
-                {"cliente": "Juan Pérez", "envio_id": 1, "vehiculo": "Camión Volvo (XF-112)", "operador": "Carlos Operador"},
-                {"cliente": "Empresa Logística S.A.", "envio_id": 2, "vehiculo": "Buque Carguero (AR-99)", "operador": "Ana Chofer"},
-                {"cliente": "Juan Pérez", "envio_id": 3, "vehiculo": "Furgón Térmico (FT-44)", "operador": "Carlos Operador"}
-            ]
-            
-            print("\nResultados de la trazabilidad:")
-            for rel in relaciones_simuladas:
-                print(f"   - El Cliente '{rel['cliente']}' contrató el Envío #{rel['envio_id']}, "
-                    f"el cual fue transportado en el {rel['vehiculo']} conducido por '{rel['operador']}'.")
-            
-            print("\n💡 Conclusión Operativa: Carlos Operador maneja la mayoría de la carga.")
-        else:
-            print("⚠️ Opción inválida.")
 
+def modulo_6_y_9_reportes_y_predicciones(usuario):
+    while True:
+        print("\n--- [MÓDULO 6 Y 9: REPORTES OPERATIVOS, ANALÍTICOS, GRAFO Y PREDICCIONES] ---")
+        print("1. Reportes Operativos de Envíos (Por País, Por Estado, Por Cliente, Demorados, Incidentes Abiertos)")
+        print("2. Reporte Analítico: Tiempos Máximos y Mínimos de Envío por Cliente")
+        print("3. Reporte Analítico: Tiempo Promedio Global de Entrega")
+        print("4. Reporte Analítico: Promedio de Incidentes por País / Estado / Cliente")
+        print("5. Reporte Analítico: Costos Totales y Promedio por Tipo de Transporte ($)")
+        print("6. Ranking de Clientes por Volumen Transportado e Histórico de Desempeño")
+        print("7. Red de Relaciones entre Clientes, Operadores, Proveedores y Envíos (Neo4j)")
+        print("8. Generar / Consultar Predicción de Atrasos y Riesgos")
+        print("9. Volver")
+        sub = input_seguro("Opción (1-9): ")
+        if sub == "1":
+            print("\n🌎 Envíos por País de Origen:", reporte_envios_por_pais())
+            print("📊 Envíos por Estado:", reporte_envios_por_estado())
+            print("🏢 Envíos por Cliente:", reporte_envios_por_cliente())
+            print("🐌 Envíos Demorados:", reporte_envios_demorados())
+            print("🚨 Incidentes Abiertos en Ruta:", len(reporte_incidentes_abiertos()))
+        elif sub == "2":
+            for d in reporte_tiempos_envio_por_cliente():
+                print(f"   - Cliente: {d[0]} | Tiempo Máx: {round(d[1] or 0, 1)} días | Tiempo Mín: {round(d[2] or 0, 1)} días")
+        elif sub == "3":
+            print(f"⏱️ Tiempo estimado promedio global de entrega: {reporte_tiempos_promedio_general()} días.")
+        elif sub == "4":
+            proms = reporte_promedio_incidentes_multicriterio()
+            print("📊 Promedio de Incidentes por País:", proms.get("por_pais"))
+            print("📊 Promedio de Incidentes por Estado:", proms.get("por_estado"))
+            print("📊 Promedio de Incidentes por Cliente:", proms.get("por_cliente"))
+        elif sub == "5":
+            print("\n💰 [ REPORTE ANALÍTICO DE COSTOS POR TIPO DE TRANSPORTE ]")
+            datos_costos = reporte_costos_por_tipo_transporte()
+            if not datos_costos:
+                print("   ⚠️ No hay tramos registrados.")
+            for medio, cant_tramos, costo_total, costo_prom in datos_costos:
+                print(f"   - Medio: {medio} | Tramos operados: {cant_tramos} | Costo Total Acumulado: ${costo_total} | Costo Promedio por Tramo: ${costo_prom}")
+        elif sub == "6":
+            print("\n⚖️ [ RANKING DE CLIENTES POR VOLUMEN DE CARGA TRANSPORTADA ]")
+            for cli, kg, cant_c in ranking_clientes_por_volumen():
+                print(f"   - Cliente: {cli} | Volumen Total: {kg} kg ({cant_c} contenedor/es)")
+            
+            print("\n📈 [ ANÁLISIS HISTÓRICO DE DESEMPEÑO Y EFECTIVIDAD LOGÍSTICA ]")
+            desemp = analisis_historico_desempeno()
+            total_env = sum(x[1] for x in desemp) or 1
+            for estado, cant in desemp:
+                pct = round((cant / total_env) * 100, 1)
+                print(f"   - Estado '{estado}': {cant} envío(s) ({pct}% del total operado)")
+        elif sub == "7":
+            relaciones = obtener_red_relaciones_grafo()
+            print("\n🕸️ [ RED DE RELACIONES EN GRAFO NEO4J ]")
+            for r in relaciones:
+                print(f"   - Cliente '{r['cliente']}' -> Envío #{r['id_envio']} ({r['origen']}->{r['destino']}) | Operador: '{r['operador']}' | Proveedor Insumos: '{r['proveedor']}'")
+        elif sub == "8":
+            op_p = input_seguro("1. Registrar Nueva Predicción de Riesgo | 2. Ver Reporte Crítico (Demora > 50%): ")
+            if op_p == "1":
+                id_env = int(input_seguro("ID del Envío: "))
+                prob = int(input_seguro("Probabilidad de demora (0-100%): "))
+                clim = input_seguro("Riesgo Climático (BAJO/MEDIO/ALTO - Detalle): ")
+                oper = input_seguro("Riesgo Operativo/Aduanero: ")
+                registrar_prediccion_riesgo(id_env, prob, clim, oper)
+            else:
+                criticos = reporte_analisis_predictivos()
+                print("\n⚠️ [ REPORTE DE PREDICCIONES CRÍTICAS DE ATRASO (> 50%) ]")
+                if not criticos:
+                    print("   ✅ No hay predicciones con probabilidad de demora superior al 50%.")
+                for p in criticos:
+                    print(f"   - Envío #{p['id_envio']} | Prob. Demora: {p['probabilidad_demora']}% | Clima: {p['riesgo_climatico']} | Operativo: {p['riesgo_operativo']}")
+        elif sub == "9":
+            break
+
+def modulo_7_finanzas():
+    while True:
+        print("\n--- [MÓDULO 7: FINANZAS ACID, CUENTAS CORRIENTES, FACTURACIÓN Y PAGOS] ---")
+        print("1. Cuenta Corriente de Clientes (Facturas Emitidas y Registro de Cobros)")
+        print("2. Cuenta Corriente de Proveedores y Operadores Logísticos (Facturas Recibidas y Órdenes de Pago)")
+        print("3. Reporte de Clientes Deudores / Mora Vencida")
+        print("4. Ejecutar Cierre Mensual Contable de Cuentas Corrientes")
+        print("5. Volver")
+        sub = input_seguro("Opción (1-5): ")
+        if sub == "1":
+            listar_clientes_formateados()
+            id_cli = int(input_seguro("\nIngresá el ID del Cliente a gestionar: "))
+            consultar_cuenta_corriente(id_cli)
+        elif sub == "2":
+            gestionar_pagos_proveedores_y_operadores_menu()
+        elif sub == "3":
+            listar_clientes_deudores()
+        elif sub == "4":
+            ejecutar_cierre_mensual_cuentas()
+        elif sub == "5":
+            break
 
 if __name__ == "__main__":
     menu_principal()
