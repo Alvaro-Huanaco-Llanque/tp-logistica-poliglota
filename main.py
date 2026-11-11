@@ -22,7 +22,9 @@ from repositories.pg_repo import (
     reporte_costos_por_tipo_transporte,
     ranking_clientes_por_volumen,
     analisis_historico_desempeno,
-    listar_clientes_formateados,
+    listar_clientes_resumido,
+    validar_cliente_activo,
+    normalizar_nombre_ubicacion,
     HUBS_PAIS,
     input_seguro
 )
@@ -52,12 +54,11 @@ ROLES_ERP = {
     4: "ANALISTA_REPORTES (Reportes Operativos, Analíticos, Grafo y Predicciones)"
 }
 
-# Permisos estrictos por Rol: Cada rol solo ve y ejecuta sus módulos asignados
 MODULOS_POR_ROL = {
-    1: ["1", "5"],          # Gerente Operaciones: Maestros/Usuarios/Sesiones y Comunicaciones
-    2: ["2", "3", "4", "5"],# Gestor Tráfico IoT: Envíos, Monitoreo GPS/Eventos, Alertas/Incidentes y Comunicaciones
-    3: ["7", "5"],          # Analista Finanzas: Cuentas Corrientes/Facturación/Pagos y Comunicaciones
-    4: ["6", "5"]           # Analista Reportes: Inteligencia Analítica/Predictiva/Grafo y Comunicaciones
+    1: ["1", "5"],
+    2: ["2", "3", "4", "5"],
+    3: ["7", "5"],
+    4: ["6", "5"]
 }
 
 def menu_principal():
@@ -158,38 +159,48 @@ def modulo_2_envios_contenedores():
             conn = get_pg_connection()
             cursor = conn.cursor()
             try:
-                listar_clientes_formateados()
-                id_cli = int(input_seguro("\nIngresá únicamente el ID del Cliente que solicita el envío: "))
+                # Mostrar solo ID, Razón Social y Estado
+                listar_clientes_resumido(mostrar_estado=True)
+                id_cli = int(input_seguro("\nIngresá el ID del Cliente que solicita el envío: "))
 
-                print("\nPuntos Logísticos (Hubs) de la red:")
-                print("  Argentina: BUE (Puerto BsAs) | EZE (Ezeiza) | ROS (Rosario) | COR (Córdoba) | MDZ (Aduana Mendoza)")
-                print("  Exterior : SCL (Puerto San Antonio, Chile) | MAD (Aeropuerto Barajas, España)")
-                origen = input_seguro("Código Hub de Origen [Ej: BUE]: ").upper() or "BUE"
-                destino = input_seguro("Código Hub de Destino [Ej: SCL]: ").upper() or "SCL"
+                # Validar inmediatamente antes de pedir cualquier otro dato
+                es_valido, msg = validar_cliente_activo(id_cli)
+                if not es_valido:
+                    print(f"❌ Operación cancelada: {msg}")
+                    continue
+
+                print("\nDestinos y Orígenes disponibles:")
+                print("  Nacionales     : Buenos Aires | Rosario | Córdoba | Mendoza")
+                print("  Internacionales: Santiago de Chile | Madrid (España)")
+                origen_in = input_seguro("Origen del envío [Ej: Buenos Aires]: ") or "Buenos Aires"
+                destino_in = input_seguro("Destino del envío [Ej: Santiago de Chile]: ") or "Santiago de Chile"
+                origen_formal = normalizar_nombre_ubicacion(origen_in)
+                destino_formal = normalizar_nombre_ubicacion(destino_in)
+
                 prioridad = input_seguro("Prioridad [ALTA / MEDIA / BAJA]: ").upper() or "MEDIA"
 
-                pais_o = HUBS_PAIS.get(origen, "Argentina")
-                pais_d = HUBS_PAIS.get(destino, "Exterior")
-                es_internacional = (pais_o != pais_d) or destino in ["SCL", "MAD"]
+                pais_o = HUBS_PAIS.get(origen_formal, "Argentina")
+                pais_d = HUBS_PAIS.get(destino_formal, "Exterior")
+                es_internacional = (pais_o != pais_d)
 
                 id_operador = None
                 if es_internacional:
-                    print(f"\n🌐 Trayecto INTERNACIONAL detectado ({origen} [{pais_o}] -> {destino} [{pais_d}]).")
-                    print("Se requiere asignar un Operador Logístico para trámites aduaneros y portuarios:")
-                    cursor.execute("SELECT id_operador, nombre_completo, especialidad FROM operador_logistico WHERE estado = 'ACTIVO';")
+                    print(f"\n🌐 Envío INTERNACIONAL detectado ({origen_formal} -> {destino_formal}).")
+                    print("Seleccioná el Operador Logístico asignado:")
+                    cursor.execute("SELECT id_operador, nombre_completo FROM operador_logistico WHERE estado = 'ACTIVO' ORDER BY id_operador;")
                     ops = cursor.fetchall()
                     for o in ops:
-                        print(f"   - ID #{o[0]}: {o[1]} | Especialidad: {o[2]}")
-                    id_operador = int(input_seguro("Seleccioná el ID del Operador Logístico: ") or (ops[0][0] if ops else 1))
+                        print(f"   - ID #{o[0]}: {o[1]}")
+                    id_operador = int(input_seguro("ID del Operador Logístico: ") or (ops[0][0] if ops else 1))
                 else:
-                    print(f"\n🚛 Trayecto NACIONAL TERRESTRE detectado ({origen} -> {destino}). No requiere Operador Aduanero/Portuario.")
+                    print(f"\n🚛 Envío NACIONAL TERRESTRE detectado ({origen_formal} -> {destino_formal}). No requiere Operador Logístico externo.")
 
-                # Listado de proveedores para asociar a los contenedores y sensores
-                cursor.execute("SELECT id_proveedor, razon_social, tipo_insumo FROM proveedor WHERE estado = 'ACTIVO' ORDER BY id_proveedor;")
+                # Mostrar proveedores de forma limpia (solo ID y Razón Social) para elegir libremente
+                cursor.execute("SELECT id_proveedor, razon_social FROM proveedor WHERE estado = 'ACTIVO' ORDER BY id_proveedor;")
                 provs = cursor.fetchall()
-                print("\nProveedores de Insumos registrados:")
+                print("\n🏢 Proveedores disponibles:")
                 for p in provs:
-                    print(f"   - ID #{p[0]}: {p[1]} (Rubro: {p[2]})")
+                    print(f"   - ID #{p[0]}: {p[1]}")
 
                 contenedores = []
                 while True:
@@ -205,7 +216,7 @@ def modulo_2_envios_contenedores():
                     print("   3. MULTIPARAMETRICO_GPS (Temperatura + Humedad + Vibración)")
                     op_s = input_seguro("Elegí el tipo de sensor (1-3): ")
                     tipo_sensor = {"1": "TEMPERATURA_GPS", "2": "HUMEDAD_GPS", "3": "MULTIPARAMETRICO_GPS"}.get(op_s, "TEMPERATURA_GPS")
-                    id_prov_sens = int(input_seguro("ID del Proveedor del Sensor IoT: ") or (provs[-1][0] if provs else 1))
+                    id_prov_sens = int(input_seguro("ID del Proveedor del Sensor IoT: ") or (provs[0][0] if provs else 1))
 
                     contenedores.append({
                         "codigo": cod,
@@ -218,7 +229,7 @@ def modulo_2_envios_contenedores():
                     if input_seguro("¿Agregar otro contenedor a este envío? (s/n): ").lower() != "s":
                         break
 
-                registrar_envio_con_contenedores_cliente(id_cli, origen, destino, prioridad, contenedores, id_operador)
+                registrar_envio_con_contenedores_cliente(id_cli, origen_formal, destino_formal, prioridad, contenedores, id_operador)
             except Exception as e:
                 print(f"❌ Error al registrar envío: {e}")
             finally:
@@ -232,20 +243,23 @@ def modulo_2_envios_contenedores():
 def modulo_3_monitoreo_iot_y_trazabilidad():
     while True:
         print("\n--- [MÓDULO 3 Y 8: MONITOREO IoT (GPS REAL), RECORRIDOS Y EVENTOS] ---")
-        print("1. Emitir Lectura IoT Continua (Simular Sensor con Lat/Lon real -> Redis + MongoDB)")
+        print("1. Emitir Lectura IoT Continua (Detecta automáticamente los sensores del Contenedor)")
         print("2. Consultar Última Posición GPS en Tiempo Real (Caché Redis)")
-        print("3. Reconstrucción del Recorrido de un Contenedor (Coordenadas Históricas MongoDB)")
+        print("3. Reconstrucción del Recorrido de un Contenedor (Secuencia de Pasos y GPS)")
         print("4. Registrar Evento Logístico en Bitácora")
         print("5. Ver Historial Completo de Eventos de un Envío")
         print("6. Volver")
         sub = input_seguro("Opción (1-6): ")
         if sub == "1":
-            id_env = int(input_seguro("ID del Envío: "))
-            id_cont = int(input_seguro("ID del Contenedor: ") or 1)
-            id_sens = int(input_seguro("ID del Sensor: ") or 1)
-            doc = generar_lectura_iot_coordenadas(id_env, id_cont, id_sens)
-            gps = doc["coordenadas_gps"]
-            print(f"✅ Lectura registrada -> Punto: {doc['ubicacion_actual']} | GPS: ({gps['lat']}, {gps['lon']}) | Temp: {doc['metricas']['temperatura_c']}°C | Bat: {doc['metricas']['bateria_pct']}%")
+            try:
+                id_env = int(input_seguro("ID del Envío: "))
+                id_cont = int(input_seguro("ID del Contenedor: ") or 1)
+                doc = generar_lectura_iot_coordenadas(id_env, id_cont)
+                gps = doc["coordenadas_gps"]
+                sensores_str = ", ".join(f"#{s}" for s in doc.get("sensores_procesados", [doc["sensor_id"]]))
+                print(f"✅ Lectura registrada (Sensor/es {sensores_str}) -> Ubicación: {doc['ubicacion_actual']} | GPS: ({gps['lat']}, {gps['lon']}) | Temp: {doc['metricas']['temperatura_c']}°C | Bat: {doc['metricas']['bateria_pct']}%")
+            except Exception as e:
+                print(f"❌ Error: {e}")
         elif sub == "2":
             id_env = int(input_seguro("ID del Envío a consultar en Redis: "))
             datos_redis = obtener_ultima_posicion_envio(id_env)
@@ -254,7 +268,7 @@ def modulo_3_monitoreo_iot_y_trazabilidad():
                 print(f"   - Punto Logístico: {datos_redis.get('punto_logistico')}")
                 print(f"   - Coordenadas GPS: Latitud {datos_redis.get('latitud')}, Longitud {datos_redis.get('longitud')}")
                 print(f"   - Temperatura: {datos_redis.get('temperatura_c')}°C | Humedad: {datos_redis.get('humedad_pct')}% | Batería: {datos_redis.get('bateria_pct')}%")
-                print(f"   - Timestamp: {datos_redis.get('ultima_actualizacion')}")
+                print(f"   - Hora Local de Lectura: {datos_redis.get('ultima_actualizacion')}")
             else:
                 print("⚠️ Sin datos en caché de Redis para ese envío.")
         elif sub == "3":
@@ -265,7 +279,7 @@ def modulo_3_monitoreo_iot_y_trazabilidad():
                 print("   ⚠️ No hay lecturas registradas para este envío.")
             for idx, l in enumerate(lecturas, 1):
                 gps = l.get("coordenadas_gps", {"lat": 0.0, "lon": 0.0})
-                print(f"   Paso {idx}: {l.get('ubicacion_actual')} -> GPS ({gps.get('lat')}, {gps.get('lon')}) | Temp: {l['metricas'].get('temperatura_c')}°C | {l.get('timestamp').strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"   Paso {idx}: {l.get('ubicacion_actual')} -> Coordenadas GPS ({gps.get('lat')}, {gps.get('lon')})")
         elif sub == "4":
             id_env = int(input_seguro("ID del Envío: "))
             print("Tipos de Eventos Oficiales:")
@@ -275,8 +289,8 @@ def modulo_3_monitoreo_iot_y_trazabilidad():
                 "1": "Carga iniciada", "2": "En tránsito", "3": "Aduana",
                 "4": "Retraso", "5": "Descarga", "6": "Entregado"
             }.get(t_op, "En tránsito")
-            ubic = input_seguro("Ubicación / Punto Logístico: ")
-            desc = input_seguro("Descripción operativa: ")
+            ubic = input_seguro("Ubicación: ")
+            desc = input_seguro("Descripción: ")
             registrar_evento_logistico(id_env, tipo, ubic, desc)
         elif sub == "5":
             id_env = int(input_seguro("ID del Envío: "))
@@ -287,9 +301,9 @@ def modulo_3_monitoreo_iot_y_trazabilidad():
                 print(f"\n📋 [ HISTORIAL DE EVENTOS LOGÍSTICOS - Envío #{id_env} ]")
                 for e in eventos:
                     fecha_str = e["fecha_y_hora"].strftime("%Y-%m-%d %H:%M")
-                    print(f"   - [{fecha_str}] envio id{e['id_envio']} tuvo un evento: {e['tipo_evento']}")
-                    print(f"     en la ubicacion: {e['ubicacion']}")
-                    print(f"     descripcion: {e['descripcion']}\n")
+                    print(f"   [{fecha_str}] Evento: {e['tipo_evento']}")
+                    print(f"     Ubicacion: {e['ubicacion']}")
+                    print(f"     Descripcion: {e['descripcion']}\n")
         elif sub == "6":
             break
 
@@ -323,7 +337,7 @@ def modulo_4_incidentes_y_alertas():
                 print("   ✅ No se registran anomalías térmicas.")
             for d in anomalias:
                 gps = d.get("coordenadas_gps", {})
-                print(f"   - Envío #{d['envio_id']} (Sensor #{d.get('sensor_id', 1)}) | Temp: {d['metricas']['temperatura_c']}°C | Hub: {d['ubicacion_actual']} ({gps.get('lat')}, {gps.get('lon')})")
+                print(f"   - Envío #{d['envio_id']} (Sensor #{d.get('sensor_id', 1)}) | Temp: {d['metricas']['temperatura_c']}°C | Ubicación: {d['ubicacion_actual']} ({gps.get('lat')}, {gps.get('lon')})")
         elif sub == "5":
             for r in ranking_rutas_incidentes():
                 print(f"   - Envío/Ruta #{r['_id']}: {r['total_incidentes']} incidente(s) registrados.")
@@ -333,20 +347,68 @@ def modulo_4_incidentes_y_alertas():
 def modulo_5_comunicaciones(usuario):
     while True:
         print("\n--- [MÓDULO 5: COMUNICACIÓN CON CLIENTES, PROVEEDORES Y OPERADORES] ---")
-        print("1. Registrar / Enviar Comunicación Externa o Interna")
+        print("1. Registrar / Enviar Comunicación (Seleccionando Destinatario por ID)")
         print("2. Ver Historial de Comunicaciones")
         print("3. Volver al panel principal")
         sub = input_seguro("Opción (1-3): ")
         if sub == "1":
-            dest = input_seguro("Destinatario (Razón Social Cliente, Proveedor u Operador Logístico): ")
-            msg = input_seguro("Mensaje / Instrucción operativa: ")
-            enviar_mensaje(usuario["nombre"], dest, msg)
+            print("\n¿A qué tipo de actor deseás enviarle una comunicación?")
+            print("  1. Cliente")
+            print("  2. Proveedor")
+            print("  3. Operador Logístico")
+            tipo_dest = input_seguro("Seleccioná una opción (1-3): ")
+            
+            conn = get_pg_connection()
+            cursor = conn.cursor()
+            destinatario_nombre = None
+            try:
+                if tipo_dest == "1":
+                    cursor.execute("SELECT id_cliente, razon_social FROM cliente ORDER BY id_cliente;")
+                    filas = cursor.fetchall()
+                    print("\n🏢 Clientes disponibles:")
+                    for f in filas: print(f"   - ID #{f[0]}: {f[1]}")
+                    id_sel = int(input_seguro("Ingresá el ID del Cliente destinatario: "))
+                    cursor.execute("SELECT razon_social FROM cliente WHERE id_cliente = %s;", (id_sel,))
+                    r = cursor.fetchone()
+                    if r: destinatario_nombre = f"Cliente: {r[0]}"
+                elif tipo_dest == "2":
+                    cursor.execute("SELECT id_proveedor, razon_social FROM proveedor ORDER BY id_proveedor;")
+                    filas = cursor.fetchall()
+                    print("\n🏢 Proveedores disponibles:")
+                    for f in filas: print(f"   - ID #{f[0]}: {f[1]}")
+                    id_sel = int(input_seguro("Ingresá el ID del Proveedor destinatario: "))
+                    cursor.execute("SELECT razon_social FROM proveedor WHERE id_proveedor = %s;", (id_sel,))
+                    r = cursor.fetchone()
+                    if r: destinatario_nombre = f"Proveedor: {r[0]}"
+                elif tipo_dest == "3":
+                    cursor.execute("SELECT id_operador, nombre_completo FROM operador_logistico ORDER BY id_operador;")
+                    filas = cursor.fetchall()
+                    print("\n👷 Operadores Logísticos disponibles:")
+                    for f in filas: print(f"   - ID #{f[0]}: {f[1]}")
+                    id_sel = int(input_seguro("Ingresá el ID del Operador Logístico destinatario: "))
+                    cursor.execute("SELECT nombre_completo FROM operador_logistico WHERE id_operador = %s;", (id_sel,))
+                    r = cursor.fetchone()
+                    if r: destinatario_nombre = f"Operador: {r[0]}"
+                else:
+                    print("⚠️ Opción inválida.")
+                    continue
+            finally:
+                cursor.close()
+                conn.close()
+
+            if not destinatario_nombre:
+                print("❌ Error: El ID ingresado no existe.")
+                continue
+
+            msg = input_seguro(f"Escribí el mensaje para [{destinatario_nombre}]: ")
+            if msg:
+                enviar_mensaje(usuario["nombre"], destinatario_nombre, msg)
         elif sub == "2":
-            mensajes = obtener_mensajes(usuario["nombre"])
+            mensajes = obtener_mensajes()
             if not mensajes:
-                print("   ⚠️ No hay comunicaciones registradas para este usuario.")
+                print("   ⚠️ No hay comunicaciones registradas.")
             for m in mensajes:
-                print(f"   [{m['fecha_y_hora'].strftime('%Y-%m-%d %H:%M')}] {m['remitente']} -> {m['destinatario']}: {m['contenido']}")
+                print(f"   [{m['fecha_y_hora'].strftime('%Y-%m-%d %H:%M')}] De: {m['remitente']} -> Para: {m['destinatario']} | Mensaje: {m['contenido']}")
         elif sub == "3":
             break
 
@@ -360,7 +422,7 @@ def modulo_6_y_9_reportes_y_predicciones(usuario):
         print("5. Reporte Analítico: Costos Totales y Promedio por Tipo de Transporte ($)")
         print("6. Ranking de Clientes por Volumen Transportado e Histórico de Desempeño")
         print("7. Red de Relaciones entre Clientes, Operadores, Proveedores y Envíos (Neo4j)")
-        print("8. Generar / Consultar Predicción de Atrasos y Riesgos")
+        print("8. Generar / Consultar Predicciones de Atrasos y Riesgos")
         print("9. Volver")
         sub = input_seguro("Opción (1-9): ")
         if sub == "1":
@@ -401,22 +463,26 @@ def modulo_6_y_9_reportes_y_predicciones(usuario):
             relaciones = obtener_red_relaciones_grafo()
             print("\n🕸️ [ RED DE RELACIONES EN GRAFO NEO4J ]")
             for r in relaciones:
-                print(f"   - Cliente '{r['cliente']}' -> Envío #{r['id_envio']} ({r['origen']}->{r['destino']}) | Operador: '{r['operador']}' | Proveedor Insumos: '{r['proveedor']}'")
+                print(f"   - Cliente '{r['cliente']}' -> Envío #{r['id_envio']} ({r['origen']} -> {r['destino']}) | Operador: '{r['operador']}' | Proveedor Insumos: '{r['proveedor']}'")
         elif sub == "8":
-            op_p = input_seguro("1. Registrar Nueva Predicción de Riesgo | 2. Ver Reporte Crítico (Demora > 50%): ")
+            op_p = input_seguro("1. Registrar Nueva Predicción de Riesgo | 2. Ver Todas las Predicciones de Atraso y Fecha Estimada: ")
             if op_p == "1":
                 id_env = int(input_seguro("ID del Envío: "))
                 prob = int(input_seguro("Probabilidad de demora (0-100%): "))
-                clim = input_seguro("Riesgo Climático (BAJO/MEDIO/ALTO - Detalle): ")
-                oper = input_seguro("Riesgo Operativo/Aduanero: ")
+                clim = input_seguro("Riesgo Climático [BAJO / MEDIO / ALTO]: ").upper() or "MEDIO"
+                oper = input_seguro("Riesgo Operativo [BAJO / MEDIO / ALTO]: ").upper() or "BAJO"
                 registrar_prediccion_riesgo(id_env, prob, clim, oper)
             else:
-                criticos = reporte_analisis_predictivos()
-                print("\n⚠️ [ REPORTE DE PREDICCIONES CRÍTICAS DE ATRASO (> 50%) ]")
-                if not criticos:
-                    print("   ✅ No hay predicciones con probabilidad de demora superior al 50%.")
-                for p in criticos:
+                predicciones = reporte_analisis_predictivos()
+                print("\n📅 [ REPORTE DE PREDICCIONES DE ATRASOS Y RIESGOS (TODOS LOS ENVÍOS) ]")
+                if not predicciones:
+                    print("   ⚠️ No hay predicciones registradas.")
+                for p in predicciones:
+                    f_calc = p.get("fecha_calculo").strftime("%Y-%m-%d %H:%M") if p.get("fecha_calculo") else "N/A"
+                    f_proy = p.get("fecha_llegada_proyectada").strftime("%Y-%m-%d") if p.get("fecha_llegada_proyectada") else "N/A"
+                    dias_atr = p.get("dias_atraso_estimados", 0)
                     print(f"   - Envío #{p['id_envio']} | Prob. Demora: {p['probabilidad_demora']}% | Clima: {p['riesgo_climatico']} | Operativo: {p['riesgo_operativo']}")
+                    print(f"     Fecha de Cálculo: {f_calc} | Atraso Estimado: +{dias_atr} días -> Nueva Fecha Estimada de Entrega: {f_proy}")
         elif sub == "9":
             break
 
@@ -424,13 +490,14 @@ def modulo_7_finanzas():
     while True:
         print("\n--- [MÓDULO 7: FINANZAS ACID, CUENTAS CORRIENTES, FACTURACIÓN Y PAGOS] ---")
         print("1. Cuenta Corriente de Clientes (Facturas Emitidas y Registro de Cobros)")
-        print("2. Cuenta Corriente de Proveedores y Operadores Logísticos (Facturas Recibidas y Órdenes de Pago)")
+        print("2. Cuenta Corriente de Proveedores y Operadores Logísticos (Facturas y Órdenes de Pago)")
         print("3. Reporte de Clientes Deudores / Mora Vencida")
         print("4. Ejecutar Cierre Mensual Contable de Cuentas Corrientes")
         print("5. Volver")
         sub = input_seguro("Opción (1-5): ")
         if sub == "1":
-            listar_clientes_formateados()
+            # Muestra solo ID y Razón Social como pediste
+            listar_clientes_resumido(mostrar_estado=False)
             id_cli = int(input_seguro("\nIngresá el ID del Cliente a gestionar: "))
             consultar_cuenta_corriente(id_cli)
         elif sub == "2":

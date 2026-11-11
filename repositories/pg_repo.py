@@ -23,6 +23,43 @@ def formatear_telefono(tel_num):
         return f"{s[:-8]} {s[-8:-4]}-{s[-4:]}"
     return s
 
+# Diccionarios de traducción de códigos a Nombres Formales Completos y Países
+NOMBRES_FORMALES_HUBS = {
+    "BUE": "Buenos Aires",
+    "BUENOS AIRES": "Buenos Aires",
+    "EZE": "Ezeiza (Buenos Aires)",
+    "EZEIZA": "Ezeiza (Buenos Aires)",
+    "ROS": "Rosario",
+    "ROSARIO": "Rosario",
+    "COR": "Córdoba",
+    "CORDOBA": "Córdoba",
+    "CÓRDOBA": "Córdoba",
+    "MDZ": "Mendoza",
+    "MENDOZA": "Mendoza",
+    "SCL": "Santiago de Chile",
+    "SANTIAGO DE CHILE": "Santiago de Chile",
+    "CHILE": "Santiago de Chile",
+    "MAD": "Madrid (España)",
+    "MADRID": "Madrid (España)",
+    "ESPAÑA": "Madrid (España)"
+}
+
+HUBS_PAIS = {
+    "Buenos Aires": "Argentina",
+    "Ezeiza (Buenos Aires)": "Argentina",
+    "Rosario": "Argentina",
+    "Córdoba": "Argentina",
+    "Mendoza": "Argentina",
+    "Santiago de Chile": "Chile",
+    "Madrid (España)": "España"
+}
+
+def normalizar_nombre_ubicacion(texto):
+    if not texto:
+        return "Buenos Aires"
+    clave = texto.strip().upper()
+    return NOMBRES_FORMALES_HUBS.get(clave, texto.strip().title())
+
 # --- SESIONES Y ACCESO POR ROL ---
 def registrar_inicio_sesion(id_usuario):
     conn = get_pg_connection()
@@ -59,7 +96,6 @@ def cerrar_sesion_activa(id_sesion):
         conn.close()
 
 def obtener_usuario_por_rol(id_rol):
-    """Permite ingresar directamente seleccionando el rol sin perder el registro de sesión."""
     conn = get_pg_connection()
     cursor = conn.cursor()
     try:
@@ -83,8 +119,9 @@ def obtener_usuario_por_rol(id_rol):
         cursor.close()
         conn.close()
 
-# --- MÓDULO 1: ABM MAESTROS (CLIENTES, PROVEEDORES, OPERADORES, USUARIOS Y SESIONES) ---
+# --- LISTADOS RESUMIDOS Y COMPLETOS DE CLIENTES ---
 def listar_clientes_formateados():
+    """Listado completo para ABM del Módulo 1."""
     conn = get_pg_connection()
     cursor = conn.cursor()
     try:
@@ -104,6 +141,43 @@ def listar_clientes_formateados():
         cursor.close()
         conn.close()
 
+def listar_clientes_resumido(mostrar_estado=True):
+    """Listado limpio para Módulo 2 (ID, Razón Social y Estado) y Módulo 7 Finanzas (ID y Razón Social)."""
+    conn = get_pg_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id_cliente, razon_social, estado_cliente FROM cliente ORDER BY id_cliente ASC;")
+        filas = cursor.fetchall()
+        if not filas:
+            print("   ⚠️ No hay clientes registrados.")
+            return
+        print("\n🏢 [ CLIENTES REGISTRADOS ]")
+        for c in filas:
+            if mostrar_estado:
+                print(f"   - ID #{c[0]} | Razón Social: {c[1]} | Estado: {c[2]}")
+            else:
+                print(f"   - ID #{c[0]} | Razón Social: {c[1]}")
+    finally:
+        cursor.close()
+        conn.close()
+
+def validar_cliente_activo(id_cliente):
+    """Verifica inmediatamente si el cliente existe y si está ACTIVO antes de pedir datos del envío."""
+    conn = get_pg_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT razon_social, estado_cliente FROM cliente WHERE id_cliente = %s;", (id_cliente,))
+        row = cursor.fetchone()
+        if not row:
+            return False, f"El Cliente #{id_cliente} no existe en la base de datos."
+        if row[1] != "ACTIVO":
+            return False, f"El Cliente #{id_cliente} ('{row[0]}') se encuentra en estado '{row[1]}'. Solo clientes ACTIVOS pueden operar."
+        return True, row[0]
+    finally:
+        cursor.close()
+        conn.close()
+
+# --- MÓDULO 1: ABM MAESTROS CON VALIDACIÓN DE EXISTENCIA DE ID ---
 def abm_cliente_menu():
     while True:
         print("\n--- [ABM Clientes (Empresas que contratan fletes)] ---")
@@ -146,8 +220,12 @@ def abm_cliente_menu():
                 listar_clientes_formateados()
 
             elif op == "3":
-                listar_clientes_formateados()
+                listar_clientes_resumido(mostrar_estado=True)
                 id_cli = int(input_seguro("ID del Cliente a modificar: "))
+                cursor.execute("SELECT razon_social FROM cliente WHERE id_cliente = %s;", (id_cli,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe ningún Cliente con ID #{id_cli}.")
+                    continue
                 razon = input_seguro("Nueva Razón Social: ")
                 tel = int(input_seguro("Nuevo Teléfono (solo números): "))
                 dir_cli = input_seguro("Nueva Dirección: ")
@@ -159,7 +237,12 @@ def abm_cliente_menu():
                 print(f"✅ Cliente #{id_cli} actualizado correctamente.")
 
             elif op == "4":
+                listar_clientes_resumido(mostrar_estado=True)
                 id_cli = int(input_seguro("ID del Cliente: "))
+                cursor.execute("SELECT razon_social FROM cliente WHERE id_cliente = %s;", (id_cli,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe ningún Cliente con ID #{id_cli}.")
+                    continue
                 print("Estados: 1. ACTIVO | 2. SUSPENDIDO | 3. INACTIVO")
                 est_op = input_seguro("Seleccioná el estado (1-3): ")
                 nuevo_estado = {"1": "ACTIVO", "2": "SUSPENDIDO", "3": "INACTIVO"}.get(est_op, "ACTIVO")
@@ -169,6 +252,10 @@ def abm_cliente_menu():
 
             elif op == "5":
                 id_cli = int(input_seguro("ID del Cliente a eliminar: "))
+                cursor.execute("SELECT razon_social FROM cliente WHERE id_cliente = %s;", (id_cli,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe ningún Cliente con ID #{id_cli}.")
+                    continue
                 cursor.execute("DELETE FROM cuenta_corriente WHERE id_cliente = %s;", (id_cli,))
                 cursor.execute("DELETE FROM cliente WHERE id_cliente = %s;", (id_cli,))
                 conn.commit()
@@ -197,9 +284,9 @@ def abm_proveedores_menu():
             if op == "1":
                 razon = input_seguro("Razón Social del Proveedor: ")
                 cuit = int(input_seguro("CUIT (11 dígitos sin guiones): "))
-                print("Rubros disponibles: 1. CONTENEDORES | 2. SENSORES_IOT | 3. FLOTA_VEHICULOS")
+                print("Rubros disponibles: 1. CONTENEDORES | 2. SENSORES_IOT | 3. INSUMOS_Y_FLOTA")
                 r_op = input_seguro("Seleccioná rubro (1-3): ")
-                rubro = {"1": "CONTENEDORES", "2": "SENSORES_IOT", "3": "FLOTA_VEHICULOS"}.get(r_op, "CONTENEDORES")
+                rubro = {"1": "CONTENEDORES", "2": "SENSORES_IOT", "3": "INSUMOS_Y_FLOTA"}.get(r_op, "INSUMOS_Y_FLOTA")
                 email = input_seguro("Email comercial: ")
                 tel = int(input_seguro("Teléfono (solo números): ") or 1144445555)
                 direc = input_seguro("Dirección fiscal: ")
@@ -215,23 +302,36 @@ def abm_proveedores_menu():
                 conn.commit()
                 print(f"✅ Proveedor #{id_prov} ('{razon}') dado de alta con Cuenta Corriente activa.")
             elif op == "2":
-                cursor.execute("SELECT id_proveedor, razon_social, cuit, tipo_insumo, email, direccion, estado FROM proveedor ORDER BY id_proveedor;")
+                cursor.execute("SELECT id_proveedor, razon_social, cuit, email, direccion, estado FROM proveedor ORDER BY id_proveedor;")
                 print("\n🏢 [ MAESTRO DE PROVEEDORES ]")
                 for p in cursor.fetchall():
-                    print(f"   - ID #{p[0]} | {p[1]} | CUIT: {formatear_cuit(p[2])} | Rubro: {p[3]} | Email: {p[4]} | Dir: {p[5]} | Estado: {p[6]}")
+                    print(f"   - ID #{p[0]} | {p[1]} | CUIT: {formatear_cuit(p[2])} | Email: {p[3]} | Dir: {p[4]} | Estado: {p[5]}")
             elif op == "3":
+                cursor.execute("SELECT id_proveedor, razon_social, estado FROM proveedor ORDER BY id_proveedor;")
+                for p in cursor.fetchall():
+                    print(f"   - ID #{p[0]} | {p[1]} | Estado: {p[2]}")
                 idp = int(input_seguro("ID del Proveedor a modificar: "))
-                print("Rubros disponibles: 1. CONTENEDORES | 2. SENSORES_IOT | 3. FLOTA_VEHICULOS")
-                r_op = input_seguro("Seleccioná nuevo rubro (1-3): ")
-                nuevo_rubro = {"1": "CONTENEDORES", "2": "SENSORES_IOT", "3": "FLOTA_VEHICULOS"}.get(r_op, "CONTENEDORES")
+                cursor.execute("SELECT razon_social FROM proveedor WHERE id_proveedor = %s;", (idp,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe ningún Proveedor con ID #{idp}.")
+                    continue
+                nueva_razon = input_seguro("Nueva Razón Social: ")
+                nueva_dir = input_seguro("Nueva Dirección: ")
                 print("Estados disponibles: 1. ACTIVO | 2. INACTIVO")
                 e_op = input_seguro("Seleccioná estado (1-2): ")
                 nuevo_est = "ACTIVO" if e_op != "2" else "INACTIVO"
-                cursor.execute("UPDATE proveedor SET tipo_insumo = %s, estado = %s WHERE id_proveedor = %s;", (nuevo_rubro, nuevo_est, idp))
+                cursor.execute("""
+                    UPDATE proveedor SET razon_social = %s, direccion = %s, estado = %s 
+                    WHERE id_proveedor = %s;
+                """, (nueva_razon, nueva_dir, nuevo_est, idp))
                 conn.commit()
-                print(f"✅ Proveedor #{idp} actualizado ({nuevo_rubro} - {nuevo_est}).")
+                print(f"✅ Proveedor #{idp} actualizado correctamente.")
             elif op == "4":
                 idp = int(input_seguro("ID del Proveedor a eliminar: "))
+                cursor.execute("SELECT razon_social FROM proveedor WHERE id_proveedor = %s;", (idp,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe ningún Proveedor con ID #{idp}.")
+                    continue
                 cursor.execute("DELETE FROM cuenta_corriente WHERE id_proveedor = %s;", (idp,))
                 cursor.execute("DELETE FROM proveedor WHERE id_proveedor = %s;", (idp,))
                 conn.commit()
@@ -245,10 +345,10 @@ def abm_proveedores_menu():
 
 def abm_operadores_logisticos_menu():
     while True:
-        print("\n--- [ABM Operadores Logísticos (Estiba en Puerto, Despacho de Aduana, Última Milla)] ---")
+        print("\n--- [ABM Operadores Logísticos] ---")
         print("1. Registrar Operador Logístico (y abrir Cuenta Corriente para liquidación)")
         print("2. Listar Operadores Logísticos")
-        print("3. Modificar Especialidad / Estado")
+        print("3. Modificar Operador Logístico / Cambiar Estado")
         print("4. Eliminar Operador Logístico")
         print("5. Volver")
         op = input_seguro("Elegí una opción (1-5): ")
@@ -263,12 +363,12 @@ def abm_operadores_logisticos_menu():
                 "3": "TRANSPORTE_ULTIMA_MILLA"
             }
             if op == "1":
-                nombre = input_seguro("Nombre / Razón Social del Operador Logístico: ")
+                nombre = input_seguro("Nombre del Operador Logístico (Ej. Carlos / Lucía): ")
                 cuit = int(input_seguro("CUIT / DNI (solo números): "))
                 print("Especialidades disponibles:")
-                print("   1. CARGA_DESCARGA_PUERTO (Estiba y consolidación de contenedores)")
-                print("   2. DESPACHANTE_ADUANA (Licencias, papeleo e intervención aduanera)")
-                print("   3. TRANSPORTE_ULTIMA_MILLA (Distribución local desde puerto/hangar a domicilio)")
+                print("   1. CARGA_DESCARGA_PUERTO")
+                print("   2. DESPACHANTE_ADUANA")
+                print("   3. TRANSPORTE_ULTIMA_MILLA")
                 esp_op = input_seguro("Seleccioná especialidad (1-3): ")
                 esp = mapeo_esp.get(esp_op, "DESPACHANTE_ADUANA")
                 email = input_seguro("Email de contacto: ")
@@ -283,14 +383,22 @@ def abm_operadores_logisticos_menu():
                     VALUES (%s, 0.00, CURRENT_TIMESTAMP, 'OPERADOR');
                 """, (id_op,))
                 conn.commit()
-                print(f"✅ Operador Logístico #{id_op} ('{nombre}') registrado con especialidad {esp}.")
+                print(f"✅ Operador Logístico #{id_op} ('{nombre}') registrado exitosamente.")
             elif op == "2":
                 cursor.execute("SELECT id_operador, nombre_completo, cuit_dni, especialidad, email, estado FROM operador_logistico ORDER BY id_operador;")
                 print("\n👷 [ MAESTRO DE OPERADORES LOGÍSTICOS ]")
                 for o in cursor.fetchall():
-                    print(f"   - ID #{o[0]} | {o[1]} | CUIT: {formatear_cuit(o[2])} | Especialidad: {o[3]} | Email: {o[4]} | Estado: {o[5]}")
+                    print(f"   - ID #{o[0]} | Nombre: {o[1]} | CUIT/DNI: {o[2]} | Especialidad: {o[3]} | Email: {o[4]} | Estado: {o[5]}")
             elif op == "3":
+                cursor.execute("SELECT id_operador, nombre_completo, especialidad, estado FROM operador_logistico ORDER BY id_operador;")
+                for o in cursor.fetchall():
+                    print(f"   - ID #{o[0]} | Nombre: {o[1]} | Especialidad: {o[2]} | Estado: {o[3]}")
                 ido = int(input_seguro("ID del Operador a modificar: "))
+                cursor.execute("SELECT nombre_completo FROM operador_logistico WHERE id_operador = %s;", (ido,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe ningún Operador Logístico con ID #{ido}.")
+                    continue
+                nuevo_nom = input_seguro("Nuevo Nombre: ")
                 print("Especialidades disponibles:")
                 print("   1. CARGA_DESCARGA_PUERTO")
                 print("   2. DESPACHANTE_ADUANA")
@@ -300,11 +408,18 @@ def abm_operadores_logisticos_menu():
                 print("Estados disponibles: 1. ACTIVO | 2. INACTIVO")
                 est_op = input_seguro("Seleccioná el nuevo estado (1-2): ")
                 nuevo_est = "ACTIVO" if est_op != "2" else "INACTIVO"
-                cursor.execute("UPDATE operador_logistico SET especialidad = %s, estado = %s WHERE id_operador = %s;", (nueva_esp, nuevo_est, ido))
+                cursor.execute("""
+                    UPDATE operador_logistico SET nombre_completo = %s, especialidad = %s, estado = %s 
+                    WHERE id_operador = %s;
+                """, (nuevo_nom, nueva_esp, nuevo_est, ido))
                 conn.commit()
-                print(f"✅ Operador #{ido} actualizado a especialidad '{nueva_esp}' ({nuevo_est}).")
+                print(f"✅ Operador #{ido} ('{nuevo_nom}') actualizado correctamente.")
             elif op == "4":
                 ido = int(input_seguro("ID del Operador a eliminar: "))
+                cursor.execute("SELECT nombre_completo FROM operador_logistico WHERE id_operador = %s;", (ido,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe ningún Operador Logístico con ID #{ido}.")
+                    continue
                 cursor.execute("DELETE FROM cuenta_corriente WHERE id_operador = %s;", (ido,))
                 cursor.execute("DELETE FROM operador_logistico WHERE id_operador = %s;", (ido,))
                 conn.commit()
@@ -317,7 +432,6 @@ def abm_operadores_logisticos_menu():
             conn.close()
 
 def abm_usuarios_y_sesiones_menu():
-    """ABM de Empleados Internos del ERP, Roles y Auditoría de Sesiones (sin cierre forzoso)."""
     while True:
         print("\n--- [ABM Usuarios Internos del ERP, Roles y Sesiones] ---")
         print("1. Dar de Alta Nuevo Empleado / Usuario Interno")
@@ -360,6 +474,10 @@ def abm_usuarios_y_sesiones_menu():
                     print(f"   - ID #{u[0]} | {u[1]} {u[2]} ({u[3]}) | Rol: {mapeo_rol.get(u[4], u[4])} | Estado: {est}")
             elif op == "3":
                 uid = int(input_seguro("ID del Usuario a activar/desactivar: "))
+                cursor.execute("SELECT id_usuario FROM usuario WHERE id_usuario = %s;", (uid,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe el Usuario #{uid}.")
+                    continue
                 est_op = input_seguro("Nuevo estado (1. ACTIVO / 2. INACTIVO): ")
                 nuevo_est = True if est_op == "1" else False
                 cursor.execute("UPDATE usuario SET estado_usuario = %s WHERE id_usuario = %s;", (nuevo_est, uid))
@@ -367,6 +485,10 @@ def abm_usuarios_y_sesiones_menu():
                 print(f"✅ Estado del Usuario #{uid} actualizado.")
             elif op == "4":
                 uid = int(input_seguro("ID del Usuario: "))
+                cursor.execute("SELECT id_usuario FROM usuario WHERE id_usuario = %s;", (uid,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe el Usuario #{uid}.")
+                    continue
                 print("Roles: 1: GERENTE_OPERACIONES | 2: GESTOR_TRAFICO_IOT | 3: ANALISTA_FINANZAS | 4: ANALISTA_REPORTES")
                 nuevo_rol = int(input_seguro("Nuevo Rol (1-4): "))
                 cursor.execute("UPDATE usuario SET id_rol = %s WHERE id_usuario = %s;", (nuevo_rol, uid))
@@ -392,37 +514,26 @@ def abm_usuarios_y_sesiones_menu():
             conn.close()
 
 
-# --- MÓDULO 2: ENVÍOS, CONTENEDORES, SENSORES Y FACTURACIÓN DIFERIDA AL ENTREGAR ---
-HUBS_PAIS = {
-    "BUE": "Argentina",
-    "EZE": "Argentina",
-    "ROS": "Argentina",
-    "COR": "Argentina",
-    "MDZ": "Argentina",
-    "SCL": "Chile",
-    "MAD": "España"
-}
-
+# --- MÓDULO 2: ENVÍOS, FACTURACIÓN AUTOMÁTICA A PROVEEDORES/OPERADORES Y FACTURACIÓN AL CLIENTE AL ENTREGAR ---
 def emitir_factura_por_entrega(cursor, id_envio):
-    """
-    Se ejecuta ÚNICAMENTE cuando un envío pasa a estado ENTREGADO.
-    Verifica que no haya sido facturado antes, suma el costo de sus tramos y carga la factura en la cuenta corriente del cliente.
-    """
+    """Factura al CLIENTE únicamente cuando el envío pasa a estado ENTREGADO."""
     cursor.execute("SELECT id_cliente, origen_envio, destino_envio FROM envio WHERE id_envio = %s;", (id_envio,))
     env = cursor.fetchone()
     if not env:
         return None
     id_cliente, origen, destino = env
+    origen_fmt = normalizar_nombre_ubicacion(origen)
+    destino_fmt = normalizar_nombre_ubicacion(destino)
 
     concepto_busqueda = f"%Envío #{id_envio}%"
     cursor.execute("SELECT id_factura FROM factura WHERE id_cliente = %s AND concepto LIKE %s;", (id_cliente, concepto_busqueda))
     if cursor.fetchone():
-        return None  # Ya fue facturado previamente
+        return None
 
     cursor.execute("SELECT COALESCE(SUM(costo_tramo), 45000.00) FROM tramo WHERE id_envio = %s;", (id_envio,))
     importe_total = cursor.fetchone()[0] or 45000.00
 
-    concepto = f"Facturación por Entrega Completada - Envío #{id_envio} ({origen} -> {destino})"
+    concepto = f"Facturación por Entrega Completada - Envío #{id_envio} ({origen_fmt} -> {destino_fmt})"
     cursor.execute("""
         INSERT INTO factura (id_cliente, importe_total, fecha_emision, estado_factura, tipo_comprobante, concepto)
         VALUES (%s, %s, CURRENT_DATE, 'a_pagar', 'COBRO_CLIENTE', %s) RETURNING id_factura;
@@ -436,21 +547,49 @@ def emitir_factura_por_entrega(cursor, id_envio):
     """, (importe_total, id_cliente))
     return id_factura, importe_total
 
-def registrar_envio_con_contenedores_cliente(id_cliente, origen, destino, prioridad, lista_contenedores, id_operador=None):
-    """
-    Registra el envío en estado EN_PREPARACION, vincula contenedores y sensores con sus respectivos proveedores
-    y crea el tramo con su operador logístico (si es internacional). NO factura hasta que se entregue.
-    """
+def registrar_cargo_automatico_proveedor(cursor, id_proveedor, importe, concepto):
+    """Genera factura por pagar y actualiza la Cuenta Corriente del Proveedor cuando usamos un insumo suyo."""
+    if not id_proveedor:
+        return None
+    cursor.execute("""
+        INSERT INTO factura (id_proveedor, importe_total, fecha_emision, estado_factura, tipo_comprobante, concepto)
+        VALUES (%s, %s, CURRENT_DATE, 'a_pagar', 'PAGO_PROVEEDOR', %s) RETURNING id_factura;
+    """, (id_proveedor, importe, concepto))
+    fid = cursor.fetchone()[0]
+    cursor.execute("""
+        UPDATE cuenta_corriente SET saldo = saldo + %s, fecha_de_actualizacion = CURRENT_TIMESTAMP
+        WHERE id_proveedor = %s;
+    """, (importe, id_proveedor))
+    return fid
+
+def registrar_cargo_automatico_operador(cursor, id_operador, importe, concepto):
+    """Genera liquidación por pagar y actualiza la Cuenta Corriente del Operador Logístico al asignarle un envío."""
+    if not id_operador:
+        return None
+    cursor.execute("""
+        INSERT INTO factura (id_operador, importe_total, fecha_emision, estado_factura, tipo_comprobante, concepto)
+        VALUES (%s, %s, CURRENT_DATE, 'a_pagar', 'PAGO_OPERADOR', %s) RETURNING id_factura;
+    """, (id_operador, importe, concepto))
+    fid = cursor.fetchone()[0]
+    cursor.execute("""
+        UPDATE cuenta_corriente SET saldo = saldo + %s, fecha_de_actualizacion = CURRENT_TIMESTAMP
+        WHERE id_operador = %s;
+    """, (importe, id_operador))
+    return fid
+
+def registrar_envio_con_contenedores_cliente(id_cliente, origen_input, destino_input, prioridad, lista_contenedores, id_operador=None):
     conn = get_pg_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT estado_cliente, razon_social FROM cliente WHERE id_cliente = %s;", (id_cliente,))
-        cli = cursor.fetchone()
-        if not cli or cli[0] != "ACTIVO":
-            raise Exception(f"El Cliente #{id_cliente} no existe o no está ACTIVO.")
-        razon_social_cliente = cli[1]
+        es_valido, msg_o_razon = validar_cliente_activo(id_cliente)
+        if not es_valido:
+            raise Exception(msg_o_razon)
+        razon_social_cliente = msg_o_razon
 
-        ruta_info = buscar_camino_optimo(origen, destino)
+        origen_formal = normalizar_nombre_ubicacion(origen_input)
+        destino_formal = normalizar_nombre_ubicacion(destino_input)
+
+        ruta_info = buscar_camino_optimo(origen_formal, destino_formal)
         if ruta_info and len(ruta_info) > 0:
             distancia_base = ruta_info[0]["distancia_total"] or 600
             horas_estimadas = ruta_info[0]["tiempo_total"] or 24
@@ -458,13 +597,13 @@ def registrar_envio_con_contenedores_cliente(id_cliente, origen, destino, priori
             distancia_base = 800
             horas_estimadas = 48
 
-        pais_orig = HUBS_PAIS.get(origen.upper(), "Argentina")
-        pais_dest = HUBS_PAIS.get(destino.upper(), "Exterior")
+        pais_orig = HUBS_PAIS.get(origen_formal, "Argentina")
+        pais_dest = HUBS_PAIS.get(destino_formal, "Exterior")
         es_internacional = (pais_orig != pais_dest)
 
-        if "MAD" in destino.upper() or prioridad == "ALTA":
+        if "Madrid" in destino_formal or prioridad == "ALTA":
             medio_transporte = "AÉREO"
-        elif "SCL" in destino.upper() and prioridad == "BAJA":
+        elif "Chile" in destino_formal and prioridad == "BAJA":
             medio_transporte = "MARÍTIMO"
         else:
             medio_transporte = "TERRESTRE"
@@ -473,22 +612,22 @@ def registrar_envio_con_contenedores_cliente(id_cliente, origen, destino, priori
         costo_unitario = tarifa_km.get(medio_transporte, 60)
         costo_estimado_tramo = round(len(lista_contenedores) * (distancia_base * costo_unitario / 10), 2)
 
-        # 1. Crear el Envío (Sin facturar todavía)
+        # 1. Crear Envío con Nombres Formales Completos
         cursor.execute("""
             INSERT INTO envio (id_cliente, origen_envio, destino_envio, fecha_creacion, estado_envio, prioridad)
             VALUES (%s, %s, %s, CURRENT_TIMESTAMP, 'EN_PREPARACION', %s) RETURNING id_envio;
-        """, (id_cliente, origen, destino, prioridad))
+        """, (id_cliente, origen_formal, destino_formal, prioridad))
         id_env = cursor.fetchone()[0]
 
-        # 2. Crear el Tramo (con costo_tramo e id_operador si es internacional)
+        # 2. Crear Tramo
         dias_estimados = max(1, round(horas_estimadas / 8))
         cursor.execute("""
             INSERT INTO tramo (id_envio, medio_de_transporte, origen, destino, fecha_de_salida, fecha_de_llegada_estimada, id_operador, costo_tramo)
             VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + (%s || ' days')::INTERVAL, %s, %s);
-        """, (id_env, medio_transporte, origen, destino, str(dias_estimados), id_operador, costo_estimado_tramo))
+        """, (id_env, medio_transporte, origen_formal, destino_formal, str(dias_estimados), id_operador, costo_estimado_tramo))
 
-        # 3. Crear Contenedores y Sensores guardando el id_proveedor correspondiente
-        nombre_prov_grafo = "Flota Propia"
+        # 3. Crear Contenedores, Sensores y generar Facturas Automáticas a los Proveedores elegidos
+        nombre_prov_grafo = "Proveedor Logístico"
         for c in lista_contenedores:
             id_prov_cont = c.get("id_proveedor_contenedor")
             id_prov_sens = c.get("id_proveedor_sensor")
@@ -500,6 +639,13 @@ def registrar_envio_con_contenedores_cliente(id_cliente, origen, destino, priori
             """, (id_env, c["codigo"], c["tipo"], c["capacidad"], id_prov_cont))
             id_cont = cursor.fetchone()[0]
 
+            # Factura automática al proveedor del contenedor ($35.000 por alquiler de contenedor)
+            if id_prov_cont:
+                registrar_cargo_automatico_proveedor(
+                    cursor, id_prov_cont, 35000.00,
+                    f"Alquiler Contenedor {c['codigo']} ({c['tipo']}) - Envío #{id_env}"
+                )
+
             fab = "Sensitech"
             if id_prov_sens:
                 cursor.execute("SELECT razon_social FROM proveedor WHERE id_proveedor = %s;", (id_prov_sens,))
@@ -510,24 +656,37 @@ def registrar_envio_con_contenedores_cliente(id_cliente, origen, destino, priori
 
             cursor.execute("""
                 INSERT INTO sensor_iot (id_contenedor, tipo_sensor, fabricante, fecha_instalacion, estado_sensor, id_proveedor)
-                VALUES (%s, %s, %s, CURRENT_DATE, TRUE, %s);
+                VALUES (%s, %s, %s, CURRENT_DATE, TRUE, %s) RETURNING id_sensor;
             """, (id_cont, tipo_sensor, fab, id_prov_sens))
+            id_sens = cursor.fetchone()[0]
 
-        # 4. Obtener nombre del operador para sincronizar con Neo4j
-        nombre_op_grafo = "Tránsito Terrestre Nacional (Sin Operador Externo)"
+            # Factura automática al proveedor del sensor ($12.000 por servicio de sensor IoT)
+            if id_prov_sens:
+                registrar_cargo_automatico_proveedor(
+                    cursor, id_prov_sens, 12000.00,
+                    f"Provisión Sensor IoT #{id_sens} ({tipo_sensor}) en Contenedor #{id_cont} - Envío #{id_env}"
+                )
+
+        # 4. Si lleva Operador Logístico, generar su Liquidación Automática ($40.000) y sincronizar Neo4j
+        nombre_op_grafo = "Tránsito Terrestre Nacional"
         if id_operador:
             cursor.execute("SELECT nombre_completo FROM operador_logistico WHERE id_operador = %s;", (id_operador,))
             op_row = cursor.fetchone()
             if op_row:
                 nombre_op_grafo = op_row[0]
+            registrar_cargo_automatico_operador(
+                cursor, id_operador, 40000.00,
+                f"Gestión Operativa y Aduanera Internacional - Envío #{id_env} ({origen_formal} -> {destino_formal})"
+            )
 
         conn.commit()
-        registrar_relaciones_envio_grafo(id_env, razon_social_cliente, nombre_op_grafo, nombre_prov_grafo, origen, destino)
+        registrar_relaciones_envio_grafo(id_env, razon_social_cliente, nombre_op_grafo, nombre_prov_grafo, origen_formal, destino_formal)
 
         alcance_str = "INTERNACIONAL" if es_internacional else "NACIONAL"
-        print(f"\n✅ Envío #{id_env} ({alcance_str}) registrado en estado 'EN_PREPARACION' para '{razon_social_cliente}'.")
-        print(f"   - Tramo planificado: {origen} -> {destino} vía {medio_transporte} ({distancia_base} km | Costo operativo: ${costo_estimado_tramo}).")
-        print(f"   - Nota comercial: La factura se emitirá automáticamente cuando el envío pase a estado 'ENTREGADO'.")
+        print(f"\n✅ Envío #{id_env} ({alcance_str}) registrado para '{razon_social_cliente}'.")
+        print(f"   - Ruta: {origen_formal} -> {destino_formal} vía {medio_transporte} ({distancia_base} km).")
+        print(f"   - Se generaron automáticamente las facturas de los Proveedores (Contenedor/Sensor) y del Operador Logístico en Cuentas por Pagar.")
+        print(f"   - La factura para el Cliente (${costo_estimado_tramo}) se emitirá cuando el envío pase a estado 'ENTREGADO'.")
         return id_env
     except Exception as e:
         conn.rollback()
@@ -539,9 +698,9 @@ def registrar_envio_con_contenedores_cliente(id_cliente, origen, destino, priori
 def abm_envio_contenedor_sensor_menu():
     while True:
         print("\n--- [Gestión de Envíos, Contenedores y Sensores] ---")
-        print("1. Listar Envíos, Contenedores y Sensores (con sus Proveedores)")
-        print("2. Asociar Nuevo Sensor IoT a un Contenedor")
-        print("3. Cambiar Estado de un Envío (Si pasa a ENTREGADO se factura automáticamente)")
+        print("1. Listar Envíos, Contenedores y Sensores (con Nombres Formales y Proveedores)")
+        print("2. Asociar Nuevo Sensor IoT a un Contenedor (Genera Factura Automática al Proveedor)")
+        print("3. Cambiar Estado de un Envío (Si pasa a ENTREGADO se factura automáticamente al Cliente)")
         print("4. Cambiar Estado de un Contenedor (Físico)")
         print("5. Cambiar Estado de un Sensor IoT (Activar/Desactivar)")
         print("6. Volver")
@@ -576,7 +735,9 @@ def abm_envio_contenedor_sensor_menu():
                 cursor.execute(query_envios, params)
                 print("\n📦 Envíos Registrados:")
                 for e in cursor.fetchall():
-                    print(f"   Envío #{e[0]} | Cliente #{e[1]} ({e[2]}) | Ruta: {e[3]} -> {e[4]} | Estado: {e[5]}")
+                    orig_fmt = normalizar_nombre_ubicacion(e[3])
+                    dest_fmt = normalizar_nombre_ubicacion(e[4])
+                    print(f"   Envío #{e[0]} | Cliente #{e[1]} ({e[2]}) | Ruta: {orig_fmt} -> {dest_fmt} | Estado: {e[5]}")
                     
                 cursor.execute(query_cont, params)
                 print("\n🚛 Contenedores Físicos:")
@@ -594,31 +755,51 @@ def abm_envio_contenedor_sensor_menu():
                     
             elif op == "2":
                 print("\n--- Asociar Sensor IoT a un Contenedor ---")
-                id_cont = int(input_seguro("ID del Contenedor donde se instala: ") or 1)
+                id_cont = int(input_seguro("ID del Contenedor donde se instala: "))
+                cursor.execute("SELECT id_envio, codigo_internacional FROM contenedor WHERE id_contenedor = %s;", (id_cont,))
+                cont_row = cursor.fetchone()
+                if not cont_row:
+                    print(f"❌ Error: No existe el Contenedor #{id_cont}.")
+                    continue
+                id_env_asoc, cod_cont = cont_row
+
                 print("Tipos de Sensor: 1. TEMPERATURA_GPS | 2. HUMEDAD_GPS | 3. MULTIPARAMETRICO_GPS")
                 t_op = input_seguro("Seleccioná tipo (1-3): ")
                 tipo_s = {"1": "TEMPERATURA_GPS", "2": "HUMEDAD_GPS", "3": "MULTIPARAMETRICO_GPS"}.get(t_op, "TEMPERATURA_GPS")
                 
-                cursor.execute("SELECT id_proveedor, razon_social FROM proveedor WHERE tipo_insumo = 'SENSORES_IOT';")
+                cursor.execute("SELECT id_proveedor, razon_social FROM proveedor WHERE estado = 'ACTIVO' ORDER BY id_proveedor;")
                 provs = cursor.fetchall()
+                print("Proveedores disponibles:")
                 for p in provs:
-                    print(f"   - Proveedor ID #{p[0]}: {p[1]}")
-                id_prov = int(input_seguro("ID del Proveedor del Sensor: ") or (provs[0][0] if provs else 1))
+                    print(f"   - ID #{p[0]}: {p[1]}")
+                id_prov = int(input_seguro("Seleccioná el ID del Proveedor: ") or (provs[0][0] if provs else 1))
                 cursor.execute("SELECT razon_social FROM proveedor WHERE id_proveedor = %s;", (id_prov,))
                 pr_row = cursor.fetchone()
-                fab = pr_row[0] if pr_row else "Sensitech"
+                if not pr_row:
+                    print(f"❌ Error: No existe el Proveedor #{id_prov}.")
+                    continue
+                fab = pr_row[0]
                 
                 cursor.execute("""
                     INSERT INTO sensor_iot (id_contenedor, tipo_sensor, fabricante, fecha_instalacion, estado_sensor, id_proveedor)
                     VALUES (%s, %s, %s, CURRENT_DATE, TRUE, %s) RETURNING id_sensor;
                 """, (id_cont, tipo_s, fab, id_prov))
                 id_sens = cursor.fetchone()[0]
+
+                fid_prov = registrar_cargo_automatico_proveedor(
+                    cursor, id_prov, 12000.00,
+                    f"Instalación Sensor IoT Adicional #{id_sens} ({tipo_s}) en Contenedor {cod_cont} (Envío #{id_env_asoc})"
+                )
                 conn.commit()
-                print(f"✅ Sensor IoT #{id_sens} ({tipo_s}) del proveedor '{fab}' asociado al Contenedor #{id_cont}.")
+                print(f"✅ Sensor IoT #{id_sens} ({tipo_s}) asociado al Contenedor #{id_cont}.")
+                print(f"📄 Se generó automáticamente la Factura de Proveedor #{fid_prov} por $12000.00 a favor de '{fab}'.")
                 
             elif op == "3":
-                print("\n--- Cambiar Estado de un Envío (Administrativo) ---")
                 id_env = int(input_seguro("ID del Envío: "))
+                cursor.execute("SELECT estado_envio FROM envio WHERE id_envio = %s;", (id_env,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe el Envío #{id_env}.")
+                    continue
                 print("Estados: 1. EN_PREPARACION | 2. EN_TRANSITO | 3. DEMORADO | 4. ENTREGADO | 5. CANCELADO")
                 est_op = input_seguro("Seleccioná (1-5): ").strip()
                 mapeo_estados = {"1": "EN_PREPARACION", "2": "EN_TRANSITO", "3": "DEMORADO", "4": "ENTREGADO", "5": "CANCELADO"}
@@ -635,6 +816,10 @@ def abm_envio_contenedor_sensor_menu():
 
             elif op == "4":
                 id_cont = int(input_seguro("ID del Contenedor: "))
+                cursor.execute("SELECT id_contenedor FROM contenedor WHERE id_contenedor = %s;", (id_cont,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe el Contenedor #{id_cont}.")
+                    continue
                 print("Estados: 1. EN_PREPARACION | 2. EN_TRANSITO | 3. DEMORADO | 4. DESCARGADO")
                 est_op = input_seguro("Seleccioná (1-4): ").strip()
                 mapeo_estados = {"1": "EN_PREPARACION", "2": "EN_TRANSITO", "3": "DEMORADO", "4": "DESCARGADO"}
@@ -645,6 +830,10 @@ def abm_envio_contenedor_sensor_menu():
 
             elif op == "5":
                 id_sens = int(input_seguro("ID del Sensor: "))
+                cursor.execute("SELECT id_sensor FROM sensor_iot WHERE id_sensor = %s;", (id_sens,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe el Sensor #{id_sens}.")
+                    continue
                 print("Estados: 1. ACTIVO | 2. INACTIVO")
                 est_op = input_seguro("Seleccioná (1-2): ").strip()
                 nuevo_est_bool = True if est_op == "1" else False
@@ -667,9 +856,9 @@ def reporte_envios_por_pais():
         cursor.execute("""
             SELECT 
                 CASE 
-                    WHEN origen_envio IN ('BUE', 'EZE', 'ROS', 'COR', 'MDZ') OR origen_envio LIKE '%Argentina%' THEN 'Argentina'
-                    WHEN origen_envio = 'SCL' OR origen_envio LIKE '%Chile%' THEN 'Chile'
-                    WHEN origen_envio = 'MAD' OR origen_envio LIKE '%España%' THEN 'España'
+                    WHEN origen_envio IN ('Buenos Aires', 'Ezeiza (Buenos Aires)', 'Rosario', 'Córdoba', 'Mendoza', 'BUE', 'ROS', 'COR', 'MDZ') THEN 'Argentina'
+                    WHEN origen_envio LIKE '%Chile%' OR origen_envio = 'SCL' THEN 'Chile'
+                    WHEN origen_envio LIKE '%España%' OR origen_envio LIKE '%Madrid%' OR origen_envio = 'MAD' THEN 'España'
                     ELSE 'Otros'
                 END as pais_origen,
                 COUNT(id_envio) as total_envios
@@ -748,7 +937,6 @@ def reporte_tiempos_promedio_general():
         conn.close()
 
 def reporte_costos_por_tipo_transporte():
-    """Devuelve: medio_de_transporte, cantidad_tramos, costo_total ($), costo_promedio ($)."""
     conn = get_pg_connection()
     cursor = conn.cursor()
     try:
@@ -798,9 +986,8 @@ def analisis_historico_desempeno():
         conn.close()
 
 
-# --- MÓDULO 7: FINANZAS ACID (CUENTAS POR COBRAR DE CLIENTES Y CUENTAS POR PAGAR A PROVEEDORES/OPERADORES) ---
+# --- MÓDULO 7: FINANZAS ACID ---
 def registrar_cobro_factura_cliente(cliente_id, id_factura):
-    """Registra el cobro cuando un cliente abona una factura a la empresa logística (Transacción ACID)."""
     conn = get_pg_connection()
     cursor = conn.cursor()
     try:
@@ -842,7 +1029,6 @@ def registrar_cobro_factura_cliente(cliente_id, id_factura):
 
         conn.commit()
         print(f"\n✅ Cobro registrado con éxito (Recibo #{id_pago} por ${importe} vía {medio_pago}).")
-        print(f"📉 Se descontaron ${importe} de la deuda en Cuenta Corriente del Cliente #{cliente_id}.")
     except Exception as e:
         conn.rollback()
         print(f"❌ Error al registrar el cobro: {e}")
@@ -874,7 +1060,6 @@ def crear_factura_y_actualizar_saldo(cliente_id, importe_total, concepto="Cargo 
         conn.close()
 
 def consultar_cuenta_corriente(cliente_id):
-    """Panel interno de Tesorería: Cuentas por Cobrar de un Cliente."""
     while True:
         conn = get_pg_connection()
         cursor = conn.cursor()
@@ -896,7 +1081,7 @@ def consultar_cuenta_corriente(cliente_id):
                 conn.commit()
                 cuenta = cursor.fetchone()
 
-            id_cuenta, saldo_deudor, fecha_act = cuenta
+            id_cuenta, _, fecha_act = cuenta
 
             cursor.execute("""
                 SELECT COALESCE(SUM(importe_total), 0) 
@@ -907,7 +1092,7 @@ def consultar_cuenta_corriente(cliente_id):
 
             print(f"\n==================================================================")
             print(f"   CUENTA CORRIENTE COMERCIAL (CUENTAS POR COBRAR - Cuenta #{id_cuenta})")
-            print(f"   Cliente: {razon_social} (CUIT: {formatear_cuit(cuit_cli)}) | Estado: {est_cli}")
+            print(f"   Cliente: {razon_social} | Estado: {est_cli}")
             print(f"   Deuda Total Pendiente de Cobro: ${deuda_facturada}")
             print(f"   Última actualización contable: {fecha_act.strftime('%Y-%m-%d %H:%M')}")
             print(f"==================================================================")
@@ -982,12 +1167,11 @@ def consultar_cuenta_corriente(cliente_id):
             break
 
 def gestionar_pagos_proveedores_y_operadores_menu():
-    """Cuentas por Pagar: Facturación y Pagos a Proveedores de Contenedores/Sensores y Operadores Logísticos."""
     while True:
         print("\n--- [Cuentas por Pagar: Proveedores y Operadores Logísticos] ---")
-        print("1. Registrar Factura de Proveedor (Alquiler Contenedor / Compra Sensor / Flota)")
-        print("2. Registrar Liquidación de Operador Logístico (Aduana / Estiba Puerto / Última Milla)")
-        print("3. Ver Estado de Deuda con Proveedores y Operadores Logísticos")
+        print("1. Registrar Factura Manual de Proveedor")
+        print("2. Registrar Liquidación Manual de Operador Logístico")
+        print("3. Ver Estado de Deuda con Proveedores y Operadores (Incluye cargos automáticos de envíos)")
         print("4. Emitir Orden de Pago a Proveedor u Operador Logístico (Transacción ACID)")
         print("5. Volver")
         op = input_seguro("Elegí una opción (1-5): ")
@@ -997,39 +1181,31 @@ def gestionar_pagos_proveedores_y_operadores_menu():
         cursor = conn.cursor()
         try:
             if op == "1":
-                cursor.execute("SELECT id_proveedor, razon_social, tipo_insumo FROM proveedor ORDER BY id_proveedor;")
+                cursor.execute("SELECT id_proveedor, razon_social FROM proveedor ORDER BY id_proveedor;")
                 for p in cursor.fetchall():
-                    print(f"   - Proveedor ID #{p[0]}: {p[1]} ({p[2]})")
+                    print(f"   - Proveedor ID #{p[0]}: {p[1]}")
                 idp = int(input_seguro("ID del Proveedor: "))
-                concepto = input_seguro("Concepto (Ej. Alquiler Contenedores / Provisión Sensores IoT): ")
+                cursor.execute("SELECT razon_social FROM proveedor WHERE id_proveedor = %s;", (idp,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe el Proveedor #{idp}.")
+                    continue
+                concepto = input_seguro("Concepto: ")
                 monto = float(input_seguro("Importe de la factura ($): "))
-                cursor.execute("""
-                    INSERT INTO factura (id_proveedor, importe_total, fecha_emision, estado_factura, tipo_comprobante, concepto)
-                    VALUES (%s, %s, CURRENT_DATE, 'a_pagar', 'PAGO_PROVEEDOR', %s) RETURNING id_factura;
-                """, (idp, monto, concepto))
-                fid = cursor.fetchone()[0]
-                cursor.execute("""
-                    UPDATE cuenta_corriente SET saldo = saldo + %s, fecha_de_actualizacion = CURRENT_TIMESTAMP
-                    WHERE id_proveedor = %s;
-                """, (monto, idp))
+                fid = registrar_cargo_automatico_proveedor(cursor, idp, monto, concepto)
                 conn.commit()
                 print(f"✅ Factura de Proveedor #{fid} registrada por ${monto}.")
             elif op == "2":
-                cursor.execute("SELECT id_operador, nombre_completo, especialidad FROM operador_logistico ORDER BY id_operador;")
+                cursor.execute("SELECT id_operador, nombre_completo FROM operador_logistico ORDER BY id_operador;")
                 for o in cursor.fetchall():
-                    print(f"   - Operador ID #{o[0]}: {o[1]} ({o[2]})")
+                    print(f"   - Operador ID #{o[0]}: {o[1]}")
                 ido = int(input_seguro("ID del Operador Logístico: "))
-                concepto = input_seguro("Concepto (Ej. Honorarios Despacho Aduanero / Descarga): ")
+                cursor.execute("SELECT nombre_completo FROM operador_logistico WHERE id_operador = %s;", (ido,))
+                if not cursor.fetchone():
+                    print(f"❌ Error: No existe el Operador #{ido}.")
+                    continue
+                concepto = input_seguro("Concepto: ")
                 monto = float(input_seguro("Importe a liquidar ($): "))
-                cursor.execute("""
-                    INSERT INTO factura (id_operador, importe_total, fecha_emision, estado_factura, tipo_comprobante, concepto)
-                    VALUES (%s, %s, CURRENT_DATE, 'a_pagar', 'PAGO_OPERADOR', %s) RETURNING id_factura;
-                """, (ido, monto, concepto))
-                fid = cursor.fetchone()[0]
-                cursor.execute("""
-                    UPDATE cuenta_corriente SET saldo = saldo + %s, fecha_de_actualizacion = CURRENT_TIMESTAMP
-                    WHERE id_operador = %s;
-                """, (monto, ido))
+                fid = registrar_cargo_automatico_operador(cursor, ido, monto, concepto)
                 conn.commit()
                 print(f"✅ Liquidación de Operador #{fid} registrada por ${monto}.")
             elif op == "3":
@@ -1042,7 +1218,7 @@ def gestionar_pagos_proveedores_y_operadores_menu():
                     WHERE f.tipo_comprobante IN ('PAGO_PROVEEDOR', 'PAGO_OPERADOR')
                     ORDER BY f.id_factura DESC;
                 """)
-                print("\n📑 [ OBLIGACIONES A PAGAR A PROVEEDORES Y OPERADORES ]")
+                print("\n📑 [ OBLIGACIONES A PAGAR A PROVEEDORES Y OPERADORES LOGÍSTICOS ]")
                 filas = cursor.fetchall()
                 if not filas:
                     print("   Sin comprobantes registrados.")
@@ -1102,11 +1278,6 @@ def listar_clientes_deudores():
         conn.close()
 
 def ejecutar_cierre_mensual_cuentas():
-    """
-    Proceso periódico contable:
-    1. Pasa a estado 'vencido' las facturas emitidas hace más de 30 días no abonadas.
-    2. Consolida el balance de Cuentas por Cobrar (Clientes) vs Cuentas por Pagar (Proveedores y Operadores).
-    """
     conn = get_pg_connection()
     cursor = conn.cursor()
     try:
