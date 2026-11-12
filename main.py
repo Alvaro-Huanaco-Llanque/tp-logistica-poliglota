@@ -24,6 +24,8 @@ from repositories.pg_repo import (
     analisis_historico_desempeno,
     listar_clientes_resumido,
     validar_cliente_activo,
+    verificar_operador_para_envio,
+    verificar_proveedor_para_envio,
     normalizar_nombre_ubicacion,
     HUBS_PAIS,
     input_seguro
@@ -79,7 +81,7 @@ def menu_principal():
             rol_id = int(op)
             usuario = obtener_usuario_por_rol(rol_id)
             if not usuario:
-                print("❌ No hay un empleado activo asignado a este rol. Ejecutá primero 'python seed_datos_prueba.py'.")
+                print("❌ No hay un empleado activo asignado a este rol.")
                 continue
             usuario["id_sesion"] = registrar_inicio_sesion(usuario["id_usuario"])
             panel_central_erp(usuario)
@@ -125,7 +127,7 @@ def panel_central_erp(usuario):
             print(f"⛔ Acceso denegado: Tu rol ({rol_nombre.split()[0]}) no tiene permisos para operar ese módulo.")
             continue
 
-        if op == "1": modulo_1_maestros()
+        if op == "1": modulo_1_maestros(usuario)
         elif op == "2": modulo_2_envios_contenedores()
         elif op == "3": modulo_3_monitoreo_iot_y_trazabilidad()
         elif op == "4": modulo_4_incidentes_y_alertas()
@@ -133,7 +135,7 @@ def panel_central_erp(usuario):
         elif op == "6": modulo_6_y_9_reportes_y_predicciones(usuario)
         elif op == "7": modulo_7_finanzas()
 
-def modulo_1_maestros():
+def modulo_1_maestros(usuario):
     while True:
         print("\n--- [MÓDULO 1: ABM MAESTROS Y SEGURIDAD] ---")
         print("1. ABM Clientes (Empresas que contratan fletes)")
@@ -145,7 +147,7 @@ def modulo_1_maestros():
         if sub == "1": abm_cliente_menu()
         elif sub == "2": abm_proveedores_menu()
         elif sub == "3": abm_operadores_logisticos_menu()
-        elif sub == "4": abm_usuarios_y_sesiones_menu()
+        elif sub == "4": abm_usuarios_y_sesiones_menu(usuario)
         elif sub == "5": break
 
 def modulo_2_envios_contenedores():
@@ -159,15 +161,18 @@ def modulo_2_envios_contenedores():
             conn = get_pg_connection()
             cursor = conn.cursor()
             try:
-                # Mostrar solo ID, Razón Social y Estado
                 listar_clientes_resumido(mostrar_estado=True)
-                id_cli = int(input_seguro("\nIngresá el ID del Cliente que solicita el envío: "))
-
-                # Validar inmediatamente antes de pedir cualquier otro dato
-                es_valido, msg = validar_cliente_activo(id_cli)
-                if not es_valido:
-                    print(f"❌ Operación cancelada: {msg}")
-                    continue
+                while True:
+                    id_cli_in = input_seguro("\nIngresá el ID del Cliente que solicita el envío: ")
+                    if not id_cli_in.isdigit():
+                        print("❌ Por favor, ingresá un ID numérico.")
+                        continue
+                    id_cli = int(id_cli_in)
+                    es_valido, msg = validar_cliente_activo(id_cli)
+                    if not es_valido:
+                        print(f"❌ {msg}")
+                        continue
+                    break
 
                 print("\nDestinos y Orígenes disponibles:")
                 print("  Nacionales     : Buenos Aires | Rosario | Córdoba | Mendoza")
@@ -186,21 +191,31 @@ def modulo_2_envios_contenedores():
                 id_operador = None
                 if es_internacional:
                     print(f"\n🌐 Envío INTERNACIONAL detectado ({origen_formal} -> {destino_formal}).")
-                    print("Seleccioná el Operador Logístico asignado:")
-                    cursor.execute("SELECT id_operador, nombre_completo FROM operador_logistico WHERE estado = 'ACTIVO' ORDER BY id_operador;")
-                    ops = cursor.fetchall()
-                    for o in ops:
-                        print(f"   - ID #{o[0]}: {o[1]}")
-                    id_operador = int(input_seguro("ID del Operador Logístico: ") or (ops[0][0] if ops else 1))
+                    print("Operadores Logísticos registrados:")
+                    cursor.execute("SELECT id_operador, nombre_completo, estado FROM operador_logistico ORDER BY id_operador;")
+                    for o in cursor.fetchall():
+                        print(f"   - ID #{o[0]}: {o[1]} (Estado: {o[2]})")
+
+                    while True:
+                        op_in = input_seguro("Ingresá el ID del Operador Logístico asignado: ")
+                        if not op_in.isdigit():
+                            print("❌ Error no existe operador u proveedor con ese id")
+                            continue
+                        id_op_cand = int(op_in)
+                        ok_op, msg_op = verificar_operador_para_envio(id_op_cand)
+                        if not ok_op:
+                            print(msg_op)
+                            continue
+                        id_operador = id_op_cand
+                        break
                 else:
                     print(f"\n🚛 Envío NACIONAL TERRESTRE detectado ({origen_formal} -> {destino_formal}). No requiere Operador Logístico externo.")
 
-                # Mostrar proveedores de forma limpia (solo ID y Razón Social) para elegir libremente
-                cursor.execute("SELECT id_proveedor, razon_social FROM proveedor WHERE estado = 'ACTIVO' ORDER BY id_proveedor;")
+                cursor.execute("SELECT id_proveedor, razon_social, estado FROM proveedor ORDER BY id_proveedor;")
                 provs = cursor.fetchall()
-                print("\n🏢 Proveedores disponibles:")
+                print("\n🏢 Proveedores registrados:")
                 for p in provs:
-                    print(f"   - ID #{p[0]}: {p[1]}")
+                    print(f"   - ID #{p[0]}: {p[1]} (Estado: {p[2]})")
 
                 contenedores = []
                 while True:
@@ -208,7 +223,19 @@ def modulo_2_envios_contenedores():
                     cod = input_seguro("Código Internacional Contenedor [Ej: MSKU-9012]: ") or f"MSKU-{1000 + len(contenedores)}"
                     tipo_c = input_seguro("Tipo de Contenedor [REFRIGERADO / ESTANDAR]: ").upper() or "REFRIGERADO"
                     cap = float(input_seguro("Capacidad máxima en kg [Enter para 25000]: ") or 25000)
-                    id_prov_cont = int(input_seguro("ID del Proveedor del Contenedor: ") or (provs[0][0] if provs else 1))
+
+                    # Validar Proveedor del Contenedor en bucle sin perder progreso
+                    while True:
+                        prov_c_in = input_seguro("ID del Proveedor del Contenedor: ")
+                        if not prov_c_in.isdigit():
+                            print("❌ Error no existe operador u proveedor con ese id")
+                            continue
+                        id_prov_cont = int(prov_c_in)
+                        ok_pc, msg_pc = verificar_proveedor_para_envio(id_prov_cont)
+                        if not ok_pc:
+                            print(msg_pc)
+                            continue
+                        break
 
                     print("Tipos de Sensor IoT a instalar en este contenedor:")
                     print("   1. TEMPERATURA_GPS")
@@ -216,7 +243,19 @@ def modulo_2_envios_contenedores():
                     print("   3. MULTIPARAMETRICO_GPS (Temperatura + Humedad + Vibración)")
                     op_s = input_seguro("Elegí el tipo de sensor (1-3): ")
                     tipo_sensor = {"1": "TEMPERATURA_GPS", "2": "HUMEDAD_GPS", "3": "MULTIPARAMETRICO_GPS"}.get(op_s, "TEMPERATURA_GPS")
-                    id_prov_sens = int(input_seguro("ID del Proveedor del Sensor IoT: ") or (provs[0][0] if provs else 1))
+
+                    # Validar Proveedor del Sensor en bucle sin perder progreso
+                    while True:
+                        prov_s_in = input_seguro("ID del Proveedor del Sensor IoT: ")
+                        if not prov_s_in.isdigit():
+                            print("❌ Error no existe operador u proveedor con ese id")
+                            continue
+                        id_prov_sens = int(prov_s_in)
+                        ok_ps, msg_ps = verificar_proveedor_para_envio(id_prov_sens)
+                        if not ok_ps:
+                            print(msg_ps)
+                            continue
+                        break
 
                     contenedores.append({
                         "codigo": cod,
@@ -478,11 +517,12 @@ def modulo_6_y_9_reportes_y_predicciones(usuario):
                 if not predicciones:
                     print("   ⚠️ No hay predicciones registradas.")
                 for p in predicciones:
-                    f_calc = p.get("fecha_calculo").strftime("%Y-%m-%d %H:%M") if p.get("fecha_calculo") else "N/A"
-                    f_proy = p.get("fecha_llegada_proyectada").strftime("%Y-%m-%d") if p.get("fecha_llegada_proyectada") else "N/A"
-                    dias_atr = p.get("dias_atraso_estimados", 0)
+                    f_orig = p.get("fecha_entrega_original")
+                    f_proy = p.get("fecha_llegada_proyectada")
+                    orig_str = f_orig.strftime("%Y-%m-%d %H:%M") if f_orig else "N/A"
+                    proy_str = f_proy.strftime("%Y-%m-%d %H:%M") if f_proy else "N/A"
                     print(f"   - Envío #{p['id_envio']} | Prob. Demora: {p['probabilidad_demora']}% | Clima: {p['riesgo_climatico']} | Operativo: {p['riesgo_operativo']}")
-                    print(f"     Fecha de Cálculo: {f_calc} | Atraso Estimado: +{dias_atr} días -> Nueva Fecha Estimada de Entrega: {f_proy}")
+                    print(f"     fecha de entrega original: ({orig_str}) -> nueva fecha de entrega estimada: ({proy_str})")
         elif sub == "9":
             break
 
@@ -491,12 +531,11 @@ def modulo_7_finanzas():
         print("\n--- [MÓDULO 7: FINANZAS ACID, CUENTAS CORRIENTES, FACTURACIÓN Y PAGOS] ---")
         print("1. Cuenta Corriente de Clientes (Facturas Emitidas y Registro de Cobros)")
         print("2. Cuenta Corriente de Proveedores y Operadores Logísticos (Facturas y Órdenes de Pago)")
-        print("3. Reporte de Clientes Deudores / Mora Vencida")
+        print("3. Reporte de Clientes Deudores / Deuda Vencida")
         print("4. Ejecutar Cierre Mensual Contable de Cuentas Corrientes")
         print("5. Volver")
         sub = input_seguro("Opción (1-5): ")
         if sub == "1":
-            # Muestra solo ID y Razón Social como pediste
             listar_clientes_resumido(mostrar_estado=False)
             id_cli = int(input_seguro("\nIngresá el ID del Cliente a gestionar: "))
             consultar_cuenta_corriente(id_cli)

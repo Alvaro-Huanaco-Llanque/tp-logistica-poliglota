@@ -4,10 +4,28 @@ from datetime import datetime, timedelta
 import random
 
 # --- MÓDULO IoT Y TELEMETRÍA ---
+def evaluar_regla_parametro(parametro, valor_actual, default_max=None, default_min=None):
+    """Evalúa si un valor viola la regla activa en MongoDB según sea MAXIMO o MINIMO."""
+    regla = mongo_db["reglas_iot"].find_one({"parametro": parametro, "estado": "ACTIVA"})
+    if regla:
+        condicion = regla.get("condicion", "MAXIMO")
+        umbral = regla.get("umbral", 0.0)
+        if condicion == "MAXIMO" and valor_actual > umbral:
+            return True, f"EXCESO_{parametro} ({valor_actual} > {umbral})"
+        elif condicion == "MINIMO" and valor_actual < umbral:
+            return True, f"BAJO_{parametro} ({valor_actual} < {umbral})"
+        return False, None
+    else:
+        if default_max is not None and valor_actual > default_max:
+            return True, f"EXCESO_{parametro} ({valor_actual} > {default_max})"
+        if default_min is not None and valor_actual < default_min:
+            return True, f"BAJA_{parametro} ({valor_actual} < {default_min})"
+        return False, None
+
 def generar_lectura_iot_coordenadas(id_envio, id_contenedor, id_sensor=None):
     """
     Busca automáticamente los sensores asociados al contenedor en PostgreSQL,
-    calcula las coordenadas GPS reales en base a la ruta de Neo4j y actualiza Redis y MongoDB con hora local.
+    calcula las coordenadas GPS reales en base a la ruta de Neo4j y actualiza Redis y MongoDB.
     """
     from config.database import get_pg_connection
     from repositories.neo4j_repo import buscar_camino_optimo
@@ -62,7 +80,7 @@ def generar_lectura_iot_coordenadas(id_envio, id_contenedor, id_sensor=None):
     lon_real = round(nodo_actual["lon"] + random.uniform(-0.015, 0.015), 6)
 
     regla_temp = mongo_db["reglas_iot"].find_one({"parametro": "TEMPERATURA"})
-    umbral_temp = regla_temp["umbral_maximo"] if regla_temp else 8.0
+    umbral_temp = regla_temp.get("umbral", 8.0) if regla_temp else 8.0
 
     ultimo_doc = None
     for s_id in sensores_db:
@@ -74,7 +92,12 @@ def generar_lectura_iot_coordenadas(id_envio, id_contenedor, id_sensor=None):
         temperatura = round(random.uniform(umbral_temp + 2.0, 22.0) if es_anomalia else random.uniform(-18.0, umbral_temp - 1.0), 2)
         humedad = round(random.uniform(45.0, 75.0), 2)
         vibracion = round(random.uniform(0.02, 0.45), 2)
-        alerta_disparada = temperatura > umbral_temp or bateria < 15
+
+        viola_temp, msg_temp = evaluar_regla_parametro("TEMPERATURA", temperatura, default_max=8.0)
+        viola_bat, msg_bat = evaluar_regla_parametro("BATERIA", bateria, default_min=15.0)
+        viola_hum, msg_hum = evaluar_regla_parametro("HUMEDAD", humedad)
+
+        alerta_disparada = viola_temp or viola_bat or viola_hum
 
         documento = {
             "envio_id": id_envio,
@@ -105,10 +128,12 @@ def generar_lectura_iot_coordenadas(id_envio, id_contenedor, id_sensor=None):
             bateria=bateria
         )
 
-        if temperatura > umbral_temp:
-            registrar_alerta(s_id, f"EXCESO_TEMPERATURA ({temperatura}°C > {umbral_temp}°C)")
-        if bateria < 15:
-            registrar_alerta(s_id, f"BATERIA_CRITICA ({bateria}%)")
+        if viola_temp:
+            registrar_alerta(s_id, msg_temp)
+        if viola_bat:
+            registrar_alerta(s_id, msg_bat)
+        if viola_hum:
+            registrar_alerta(s_id, msg_hum)
 
         ultimo_doc = documento
 
@@ -160,37 +185,40 @@ def registrar_alerta(id_sensor, tipo_alerta, estado="ACTIVA", id_evento=None):
         "estado": estado
     }
     coleccion.insert_one(documento)
-    print(f"⚠️ Alerta automática ('{tipo_alerta}') disparada por el Sensor #{id_sensor}.")
+    print(f"⚠️ Alerta ('{tipo_alerta}') registrada como ACTIVA para el Sensor #{id_sensor}.")
 
 
 # --- MÓDULO PREDICTIVO DE ATRASOS Y RIESGOS ---
 def registrar_prediccion_riesgo(id_envio, probabilidad_demora, riesgo_climatico, riesgo_operativo):
     """
-    Calcula cuántos días adicionales puede atrasarse el envío en base a la probabilidad,
-    el clima y el riesgo operativo, proyectando la nueva fecha estimada de llegada.
+    Obtiene la fecha de entrega original del tramo en PostgreSQL y calcula la nueva fecha
+    de entrega estimada (con fecha y hora) en base al riesgo climático, operativo y probabilidad.
     """
     from config.database import get_pg_connection
     conn = get_pg_connection()
     cursor = conn.cursor()
-    fecha_base_llegada = datetime.now() + timedelta(days=3)
+    fecha_entrega_original = datetime.now() + timedelta(days=3)
     try:
         cursor.execute("SELECT fecha_de_llegada_estimada FROM tramo WHERE id_envio = %s LIMIT 1;", (id_envio,))
         row = cursor.fetchone()
         if row and row[0]:
-            fecha_base_llegada = row[0]
+            fecha_entrega_original = row[0]
     finally:
         cursor.close()
         conn.close()
 
-    # Cálculo de días de atraso proyectados según porcentaje de demora y factores
-    dias_atraso = round((probabilidad_demora / 20.0), 1)
+    horas_atraso = round((probabilidad_demora / 100.0) * 72)  # Hasta 72hs base según probabilidad
     if "ALTO" in riesgo_climatico.upper():
-        dias_atraso += 2.0
-    if "ALTO" in riesgo_operativo.upper():
-        dias_atraso += 1.5
-    dias_atraso = round(dias_atraso, 1)
+        horas_atraso += 48
+    elif "MEDIO" in riesgo_climatico.upper():
+        horas_atraso += 24
 
-    fecha_estimada_con_atraso = fecha_base_llegada + timedelta(days=dias_atraso)
+    if "ALTO" in riesgo_operativo.upper():
+        horas_atraso += 36
+    elif "MEDIO" in riesgo_operativo.upper():
+        horas_atraso += 12
+
+    nueva_fecha_entrega = fecha_entrega_original + timedelta(hours=horas_atraso)
 
     coleccion = mongo_db["predicciones_riesgos"]
     documento = {
@@ -198,15 +226,17 @@ def registrar_prediccion_riesgo(id_envio, probabilidad_demora, riesgo_climatico,
         "probabilidad_demora": probabilidad_demora,
         "riesgo_climatico": riesgo_climatico,
         "riesgo_operativo": riesgo_operativo,
-        "dias_atraso_estimados": dias_atraso,
-        "fecha_calculo": datetime.now(),
-        "fecha_llegada_proyectada": fecha_estimada_con_atraso
+        "fecha_entrega_original": fecha_entrega_original,
+        "fecha_llegada_proyectada": nueva_fecha_entrega,
+        "fecha_calculo": datetime.now()
     }
     coleccion.insert_one(documento)
-    print(f"📈 Predicción registrada para Envío #{id_envio}: Atraso estimado de +{dias_atraso} días (Nueva llegada proyectada: {fecha_estimada_con_atraso.strftime('%Y-%m-%d')}).")
+    orig_str = fecha_entrega_original.strftime("%Y-%m-%d %H:%M")
+    nueva_str = nueva_fecha_entrega.strftime("%Y-%m-%d %H:%M")
+    print(f"📈 Predicción registrada para Envío #{id_envio}:")
+    print(f"   fecha de entrega original: ({orig_str}) -> nueva fecha de entrega estimada: ({nueva_str})")
 
 def reporte_analisis_predictivos():
-    """Devuelve TODAS las predicciones de atrasos y riesgos ordenadas por probabilidad."""
     coleccion = mongo_db["predicciones_riesgos"]
     return list(coleccion.find().sort("probabilidad_demora", -1))
 
@@ -225,12 +255,11 @@ def enviar_mensaje(remitente, destinatario, contenido, tipo="TEXTO"):
     print(f"💬 Comunicación enviada de '{remitente}' a '{destinatario}'.")
 
 def obtener_mensajes(usuario_nombre=None):
-    """Lista todo el historial de comunicaciones de la empresa con las partes."""
     coleccion = mongo_db["mensajes"]
     return list(coleccion.find().sort("fecha_y_hora", 1))
 
 
-# --- MÓDULO DE REPORTES E INCIDENTES ---
+# --- MÓDULO DE REPORTES, REGLAS IoT Y ALERTAS ---
 def guardar_reporte(usuario_generador, tipo_reporte, contenido, formato="JSON"):
     coleccion = mongo_db["reportes"]
     documento = {
@@ -261,43 +290,191 @@ def ranking_rutas_incidentes():
     return list(coleccion.aggregate(pipeline))
 
 def abm_reglas_y_alertas_menu():
-    from repositories.pg_repo import input_seguro
+    """Permite crear reglas, modificar reglas existentes, registrar alertas manuales contextuales y resolverlas."""
+    from repositories.pg_repo import input_seguro, normalizar_nombre_ubicacion
+    from config.database import get_pg_connection
+
     while True:
         print("\n--- [ABM Reglas IoT y Alertas de Sensores (MongoDB)] ---")
-        print("1. Crear / Modificar Regla de Umbral (Ej. Temperatura Máxima)")
-        print("2. Listar Reglas Activas")
-        print("3. Listar Alertas Disparadas por Sensores")
-        print("4. Cambiar Estado de una Alerta (ACTIVA -> RESUELTA)")
-        print("5. Volver")
-        op = input_seguro("Elegí una opción (1-5): ")
-        if op == "5":
+        print("1. Crear Nueva Regla de Umbral IoT (Definir Umbral Mínimo o Máximo)")
+        print("2. Modificar una Regla Existente")
+        print("3. Listar Reglas Configuradas")
+        print("4. Registrar Alerta de Sensor Manualmente (Contextual según tipo de sensor)")
+        print("5. Listar Alertas Disparadas por Sensores")
+        print("6. Cambiar Estado de una Alerta (ACTIVA -> RESUELTA)")
+        print("7. Volver")
+        op = input_seguro("Elegí una opción (1-7): ")
+        if op == "7":
             break
+
         if op == "1":
-            param = input_seguro("Parámetro a controlar [TEMPERATURA / BATERIA / HUMEDAD]: ").upper() or "TEMPERATURA"
-            umbral = float(input_seguro("Valor umbral límite (ej. 8.0 para °C): ") or 8.0)
+            print("\nParámetros disponibles: 1. TEMPERATURA | 2. HUMEDAD | 3. BATERIA")
+            p_op = input_seguro("Seleccioná el parámetro (1-3): ")
+            param = {"1": "TEMPERATURA", "2": "HUMEDAD", "3": "BATERIA"}.get(p_op, "TEMPERATURA")
+
+            print("¿Qué condición dispara la alerta?")
+            print("  1. MAXIMO (Dispara alerta si la lectura SUPERA el umbral, ej. Exceso Temperatura)")
+            print("  2. MINIMO (Dispara alerta si la lectura CAE POR DEBAJO del umbral, ej. Batería Baja)")
+            c_op = input_seguro("Seleccioná condición (1-2): ")
+            condicion = "MINIMO" if c_op == "2" else "MAXIMO"
+
+            umbral = float(input_seguro(f"Valor del umbral ({condicion}) para {param}: ") or 10.0)
             mongo_db["reglas_iot"].update_one(
-                {"parametro": param},
-                {"$set": {"umbral_maximo": umbral, "estado": "ACTIVA", "actualizado": datetime.now()}},
+                {"parametro": param, "condicion": condicion},
+                {"$set": {
+                    "parametro": param,
+                    "condicion": condicion,
+                    "umbral": umbral,
+                    "estado": "ACTIVA",
+                    "actualizado": datetime.now()
+                }},
                 upsert=True
             )
-            print(f"✅ Regla para '{param}' configurada con umbral máximo de {umbral}.")
+            simbolo = ">" if condicion == "MAXIMO" else "<"
+            print(f"✅ Regla creada: Alerta si {param} {simbolo} {umbral} (Condición: {condicion}).")
+
         elif op == "2":
             reglas = list(mongo_db["reglas_iot"].find())
-            print("\n⚙️ [ REGLAS Y UMBRALES CONFIGURADOS ]")
-            if not reglas: print("   ⚠️ No hay reglas cargadas.")
-            for r in reglas: print(f"   - Parámetro: {r.get('parametro')} | Umbral Máx: {r.get('umbral_maximo')} | Estado: {r.get('estado')}")
+            if not reglas:
+                print("   ⚠️ No hay reglas creadas para modificar.")
+                continue
+            print("\n⚙️ [ SELECCIONÁ LA REGLA A MODIFICAR ]")
+            for idx, r in enumerate(reglas, 1):
+                cond = r.get("condicion", "MAXIMO")
+                val = r.get("umbral", r.get("umbral_maximo", 0))
+                print(f"   {idx}. Parámetro: {r.get('parametro')} | Condición: {cond} | Umbral actual: {val} | Estado: {r.get('estado')}")
+            
+            sel = input_seguro(f"Ingresá el número de regla a modificar (1-{len(reglas)}): ")
+            if not sel.isdigit() or not (1 <= int(sel) <= len(reglas)):
+                print("❌ Selección inválida.")
+                continue
+            regla_elegida = reglas[int(sel) - 1]
+            cond_actual = regla_elegida.get("condicion", "MAXIMO")
+            val_actual = regla_elegida.get("umbral", regla_elegida.get("umbral_maximo", 0))
+
+            print(f"Condición actual: [{cond_actual}] (1. MAXIMO | 2. MINIMO | Enter para mantener)")
+            c_in = input_seguro("Nueva condición: ")
+            nueva_cond = "MAXIMO" if c_in == "1" else ("MINIMO" if c_in == "2" else cond_actual)
+
+            u_in = input_seguro(f"Nuevo valor de umbral [{val_actual}] (Enter para mantener): ")
+            nuevo_umbral = float(u_in) if u_in else val_actual
+
+            print(f"Estado actual: [{regla_elegida.get('estado', 'ACTIVA')}] (1. ACTIVA | 2. INACTIVA | Enter para mantener)")
+            e_in = input_seguro("Nuevo estado: ")
+            nuevo_est = "ACTIVA" if e_in == "1" else ("INACTIVA" if e_in == "2" else regla_elegida.get("estado", "ACTIVA"))
+
+            mongo_db["reglas_iot"].update_one(
+                {"_id": regla_elegida["_id"]},
+                {"$set": {
+                    "condicion": nueva_cond,
+                    "umbral": nuevo_umbral,
+                    "estado": nuevo_est,
+                    "actualizado": datetime.now()
+                }}
+            )
+            print(f"✅ Regla de '{regla_elegida.get('parametro')}' actualizada correctamente.")
+
         elif op == "3":
+            reglas = list(mongo_db["reglas_iot"].find())
+            print("\n⚙️ [ REGLAS Y UMBRALES CONFIGURADOS ]")
+            if not reglas:
+                print("   ⚠️ No hay reglas cargadas.")
+            for r in reglas:
+                cond = r.get("condicion", "MAXIMO")
+                val = r.get("umbral", r.get("umbral_maximo", 0))
+                simbolo = "Máx (>)" if cond == "MAXIMO" else "Mín (<)"
+                print(f"   - Parámetro: {r.get('parametro')} | Condición: {cond} | Umbral {simbolo}: {val} | Estado: {r.get('estado')}")
+
+        elif op == "4":
+            conn = get_pg_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    SELECT s.id_sensor, s.tipo_sensor, s.estado_sensor,
+                           c.id_contenedor, c.codigo_internacional,
+                           e.id_envio, e.origen_envio, e.destino_envio
+                    FROM sensor_iot s
+                    JOIN contenedor c ON s.id_contenedor = c.id_contenedor
+                    JOIN envio e ON c.id_envio = e.id_envio
+                    ORDER BY s.id_sensor ASC;
+                """)
+                sensores = cursor.fetchall()
+                if not sensores:
+                    print("   ⚠️ No hay sensores registrados.")
+                    continue
+                print("\n📡 [ LISTADO DE ENVÍOS, CONTENEDORES Y SENSORES ]")
+                mapa_sensores = {}
+                for s in sensores:
+                    est_s = "ACTIVO" if s[2] else "INACTIVO"
+                    orig = normalizar_nombre_ubicacion(s[6])
+                    dest = normalizar_nombre_ubicacion(s[7])
+                    print(f"   - Sensor ID #{s[0]} ({s[1]} - {est_s}) | Contenedor #{s[3]} ({s[4]}) | Envío #{s[5]} ({orig} -> {dest})")
+                    mapa_sensores[s[0]] = s[1]
+
+                id_s = int(input_seguro("\nIngresá el ID del Sensor para registrar la alerta: "))
+                if id_s not in mapa_sensores:
+                    print(f"❌ Error: No existe el Sensor con ID #{id_s}.")
+                    continue
+
+                tipo_sensor_db = mapa_sensores[id_s].upper()
+                if "TEMPERATURA" in tipo_sensor_db:
+                    opciones_alerta = [
+                        "EXCESO_TEMPERATURA",
+                        "BAJA_TEMPERATURA",
+                        "NO_REGISTRA_TEMPERATURA",
+                        "BATERIA_BAJA_O_SIN_SENAL_GPS"
+                    ]
+                elif "HUMEDAD" in tipo_sensor_db:
+                    opciones_alerta = [
+                        "EXCESO_HUMEDAD",
+                        "BAJA_HUMEDAD",
+                        "NO_REGISTRA_HUMEDAD",
+                        "BATERIA_BAJA_O_SIN_SENAL_GPS"
+                    ]
+                else:
+                    opciones_alerta = [
+                        "EXCESO_TEMPERATURA_O_HUMEDAD",
+                        "VIBRACION_EXCESIVA_GOLPE",
+                        "PERDIDA_SENAL_GPS",
+                        "BATERIA_CRITICA"
+                    ]
+
+                print(f"\nTipos de Alerta disponibles para el Sensor #{id_s} ({tipo_sensor_db}):")
+                for idx, nombre_al in enumerate(opciones_alerta, 1):
+                    print(f"   {idx}. {nombre_al}")
+                
+                op_al = input_seguro(f"Seleccioná el tipo de alerta (1-{len(opciones_alerta)}): ")
+                idx_al = int(op_al) - 1 if (op_al.isdigit() and 1 <= int(op_al) <= len(opciones_alerta)) else 0
+                alerta_elegida = opciones_alerta[idx_al]
+
+                registrar_alerta(id_s, alerta_elegida, estado="ACTIVA")
+            finally:
+                cursor.close()
+                conn.close()
+
+        elif op == "5":
             alertas = list(mongo_db["alertas"].find().sort("fecha", -1))
             print("\n🔔 [ ALERTAS DE SENSORES IoT ]")
-            if not alertas: print("   ✅ No hay alertas registradas.")
-            for a in alertas: print(f"   - ID Sensor #{a.get('id_sensor')} | Tipo: {a.get('tipo')} | Estado: {a.get('estado')} | Fecha: {a.get('fecha').strftime('%Y-%m-%d %H:%M')}")
-        elif op == "4":
+            if not alertas:
+                print("   ✅ No hay alertas registradas.")
+            for a in alertas:
+                f_str = a.get("fecha").strftime("%Y-%m-%d %H:%M:%S") if a.get("fecha") else "N/A"
+                print(f"   - ID Sensor #{a.get('id_sensor')} | Tipo: {a.get('tipo')} | Estado: {a.get('estado')} | Fecha: {f_str}")
+
+        elif op == "6":
+            alertas_activas = list(mongo_db["alertas"].find({"estado": "ACTIVA"}).sort("fecha", -1))
+            if not alertas_activas:
+                print("   ✅ No hay alertas ACTIVAS pendientes de resolver.")
+                continue
+            print("\n🔔 [ ALERTAS ACTIVAS ]")
+            for a in alertas_activas:
+                print(f"   - Sensor ID #{a.get('id_sensor')} | Tipo: {a.get('tipo')} | Fecha: {a.get('fecha').strftime('%Y-%m-%d %H:%M')}")
             id_s = int(input_seguro("Ingresá el ID del Sensor cuya alerta querés marcar como RESUELTA: "))
             res = mongo_db["alertas"].update_many({"id_sensor": id_s, "estado": "ACTIVA"}, {"$set": {"estado": "RESUELTA"}})
             if res.modified_count > 0:
                 print(f"✅ {res.modified_count} alerta(s) del Sensor #{id_s} marcadas como RESUELTAS.")
             else:
-                print(f"⚠️ El Sensor #{id_s} no tenía alertas activas pendientes.")
+                print(f"⚠️ El Sensor #{id_s} no tenía alertas activas.")
 
 def reporte_promedio_incidentes_multicriterio():
     from config.database import get_pg_connection

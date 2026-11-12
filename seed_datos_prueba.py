@@ -1,4 +1,5 @@
 import time
+from datetime import datetime
 from repositories.neo4j_repo import inicializar_red_hubs_neo4j
 from repositories.pg_repo import registrar_envio_con_contenedores_cliente, emitir_factura_por_entrega
 from repositories.mongo_repo import (
@@ -29,7 +30,7 @@ def cargar_datos_prueba():
             RESTART IDENTITY CASCADE;
         """)
 
-        # 2. Insertar los 4 Roles y Empleados del ERP
+        # 2. Insertar los 4 Roles y Empleados del ERP con apellidos reales
         cursor.execute("""
             INSERT INTO rol (id_rol, descripcion, nivel_de_permisos) VALUES
             (1, 'GERENTE_OPERACIONES', 100),
@@ -38,10 +39,10 @@ def cargar_datos_prueba():
             (4, 'ANALISTA_REPORTES', 60);
 
             INSERT INTO usuario (id_rol, nombre, apellido, email, contrasena_encriptada, estado_usuario) VALUES
-            (1, 'Alvaro', 'Gerente', 'gerencia@logistica.com', '1234', TRUE),
-            (2, 'Licha', 'Trafico', 'trafico@logistica.com', '1234', TRUE),
-            (3, 'Sofia', 'Finanzas', 'finanzas@logistica.com', '1234', TRUE),
-            (4, 'Martin', 'Reportes', 'reportes@logistica.com', '1234', TRUE);
+            (1, 'Alvaro', 'Gómez', 'alvaro@logistica.com', '1234', TRUE),
+            (2, 'Licha', 'Fernández', 'licha@logistica.com', '1234', TRUE),
+            (3, 'Sofía', 'López', 'sofia@logistica.com', '1234', TRUE),
+            (4, 'Martín', 'Martínez', 'martin@logistica.com', '1234', TRUE);
         """)
 
         # 3. Crear Clientes
@@ -60,7 +61,7 @@ def cargar_datos_prueba():
         """)
         cursor.execute("INSERT INTO cuenta_corriente (id_proveedor, saldo, tipo_entidad) VALUES (1, 0.00, 'PROVEEDOR'), (2, 0.00, 'PROVEEDOR');")
 
-        # 5. Crear Operadores Logísticos con nombres simples (Carlos y Lucía)
+        # 5. Crear Operadores Logísticos (Carlos y Lucía)
         cursor.execute("""
             INSERT INTO operador_logistico (cuit_dni, nombre_completo, especialidad, email, telefono, estado) VALUES
             (20334455667, 'Carlos', 'DESPACHANTE_ADUANA', 'carlos@operadores.com', 2614445566, 'ACTIVO'),
@@ -69,12 +70,11 @@ def cargar_datos_prueba():
         cursor.execute("INSERT INTO cuenta_corriente (id_operador, saldo, tipo_entidad) VALUES (1, 0.00, 'OPERADOR'), (2, 0.00, 'OPERADOR');")
         conn.commit()
 
-        # 6. Configurar Regla IoT en MongoDB
-        mongo_db["reglas_iot"].update_one(
-            {"parametro": "TEMPERATURA"},
-            {"$set": {"umbral_maximo": 8.0, "estado": "ACTIVA"}},
-            upsert=True
-        )
+        # 6. Configurar Reglas IoT en MongoDB (MAXIMO para Temperatura y MINIMO para Batería)
+        mongo_db["reglas_iot"].insert_many([
+            {"parametro": "TEMPERATURA", "condicion": "MAXIMO", "umbral": 8.0, "estado": "ACTIVA", "actualizado": datetime.now()},
+            {"parametro": "BATERIA", "condicion": "MINIMO", "umbral": 15.0, "estado": "ACTIVA", "actualizado": datetime.now()}
+        ])
 
         # 7. Crear Envío #1 (Internacional: Buenos Aires -> Santiago de Chile con Operador Carlos)
         contenedores_env1 = [{
@@ -107,7 +107,7 @@ def cargar_datos_prueba():
         cursor.execute("UPDATE contenedor SET estado_contenedor = 'EN_TRANSITO' WHERE id_envio = %s;", (id_env2,))
         conn.commit()
 
-        # 8. Generar Lecturas IoT, Eventos, Incidentes y Predicciones (incluyendo <50% y >50%)
+        # 8. Generar Lecturas IoT, Eventos, Incidentes y Predicciones
         for _ in range(3):
             generar_lectura_iot_coordenadas(id_env1, 1)
             time.sleep(0.1)
@@ -121,8 +121,8 @@ def cargar_datos_prueba():
         registrar_prediccion_riesgo(id_env1, 75, "ALTO", "MEDIO")
         registrar_prediccion_riesgo(id_env2, 25, "BAJO", "BAJO")
 
-        enviar_mensaje("Alvaro Gerente", "Cliente: TechCorp Exports S.A.", "Confirmamos recepción de solicitud de flete Buenos Aires -> Santiago de Chile.")
-        enviar_mensaje("Licha Trafico", "Operador: Carlos", "Enviar documentación aduanera para liberación en Mendoza.")
+        enviar_mensaje("Alvaro Gómez", "Cliente: TechCorp Exports S.A.", "Confirmamos recepción de solicitud de flete Buenos Aires -> Santiago de Chile.")
+        enviar_mensaje("Licha Fernández", "Operador: Carlos", "Enviar documentación aduanera para liberación en Mendoza.")
 
         print("\n🎉 ¡Base de datos cuádruple inicializada y sembrada con éxito!")
         print("👉 Ejecutá 'python main.py' para probar los cambios.")
