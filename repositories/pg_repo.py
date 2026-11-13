@@ -1407,7 +1407,7 @@ def listar_clientes_deudores():
     try:
         cursor.execute("""
             SELECT c.id_cliente, c.razon_social, SUM(f.importe_total) as deuda_pendiente, COUNT(f.id_factura),
-                   SUM(CASE WHEN LOWER(f.estado_factura) = 'vencido' THEN f.importe_total ELSE 0 END) as monto_vencido
+                SUM(CASE WHEN LOWER(f.estado_factura) = 'vencido' THEN f.importe_total ELSE 0 END) as monto_vencido
             FROM cliente c
             JOIN factura f ON c.id_cliente = f.id_cliente
             WHERE LOWER(f.estado_factura) IN ('a_pagar', 'vencido')
